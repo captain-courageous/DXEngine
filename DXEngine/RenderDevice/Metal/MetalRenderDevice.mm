@@ -11,9 +11,16 @@
 #import "../../../DXWidgets/src/window/cocoa/AppKitWrapper.h"
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <dispatch/dispatch.h>
+#include <objc/runtime.h>
 #include <map>
 #include <vector>
 #include <stdexcept>
+
+extern "C" {
+void* objc_autoreleasePoolPush(void);
+void objc_autoreleasePoolPop(void* context);
+}
 
 namespace {
 struct Vertex { vec4 position,color; vec2 uv,lm; vec4 detail,macro,fog; };
@@ -30,13 +37,10 @@ int TextureBaseMip(const TextureInfo& info, const UDXEngineClient& client)
 }
 // Each slot is reused only after its command buffer has finished reading it.
 struct FrameVertices {
-    id<MTLCommandBuffer> submitted;
     std::vector<id<MTLBuffer>> chunks;
     size_t chunk=0, offset=0;
     void reset() {
-        [submitted waitUntilCompleted];
-        if (submitted.error) throw std::runtime_error(submitted.error.localizedDescription.UTF8String);
-        submitted=nil; chunk=offset=0;
+        chunk=offset=0;
     }
     std::pair<id<MTLBuffer>,size_t> reserve(id<MTLDevice> device,size_t bytes) {
         if (!bytes || bytes>device.maxBufferLength-15) throw std::runtime_error("Metal: invalid vertex buffer size");
@@ -52,34 +56,79 @@ struct FrameVertices {
     }
 };
 
-id<MTLTexture> UploadMetalTexture(id<MTLDevice> device,const TextureInfo& info,int baseMip,bool masked)
+static thread_local std::vector<uint8_t> g_uploadScratchBuffer;
+
+void UploadMetalMipLevel(id<MTLTexture> texture, GLTextureUploader* uploader, const TextureInfo& info, int mipIndex, int level, size_t pixelSize, size_t inputSize, bool masked)
 {
-    if (!info.Mips || baseMip<0 || baseMip>=info.NumMips) throw std::runtime_error("Metal: invalid mip level");
-    auto uploader=GLTextureUploader::GetUploader(info.Format);
-    if (!uploader || (uploader->GetInternalformat()!=GL_RGBA8 && uploader->GetInternalformat()!=GL_RGBA32F))
-        throw std::runtime_error("Metal: unsupported texture format "+std::to_string(uint32_t(info.Format)));
-    auto& base=info.Mips[baseMip];
-    if (base.Width<=0 || base.Height<=0 || base.Width>16384 || base.Height>16384) throw std::runtime_error("Metal: invalid texture dimensions");
-    int levels=1;
-    for (int size=std::max(base.Width,base.Height); size>1 && levels<info.NumMips-baseMip; size/=2) ++levels;
-    const size_t pixelSize=info.Format==TextureFormat::RGBA32_F ? 16 : 4;
-    const size_t inputSize=info.Format==TextureFormat::P8 ? 1 : info.Format==TextureFormat::RGB8 ? 3 : pixelSize;
-    const auto format=info.Format==TextureFormat::BGRA8 ? MTLPixelFormatBGRA8Unorm : info.Format==TextureFormat::RGBA32_F ? MTLPixelFormatRGBA32Float : MTLPixelFormatRGBA8Unorm;
-    auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:base.Width height:base.Height mipmapped:levels>1];
-    desc.mipmapLevelCount=levels; desc.storageMode=MTLStorageModeShared; desc.usage=MTLTextureUsageShaderRead;
-    id<MTLTexture> result=[device newTextureWithDescriptor:desc];
-    if (!result) throw std::runtime_error("Metal: texture allocation failed");
-    std::vector<uint8_t> pixels(size_t(base.Width)*base.Height*pixelSize);
-    for (int level=0; level<levels; ++level) {
-        auto& mip=info.Mips[baseMip+level];
-        if (mip.Width!=std::max(base.Width>>level,1) || mip.Height!=std::max(base.Height>>level,1))
+    auto& mip = info.Mips[mipIndex];
+    if (mip.Width <= 0 || mip.Height <= 0) return;
+    size_t needed = size_t(mip.Width) * mip.Height * pixelSize;
+    if (g_uploadScratchBuffer.size() < needed) {
+        g_uploadScratchBuffer.resize(needed);
+    }
+    uploader->UploadRect(g_uploadScratchBuffer.data(), &mip, 0, 0, mip.Width, mip.Height, info.Palette, masked);
+    [texture replaceRegion:MTLRegionMake2D(0, 0, mip.Width, mip.Height)
+               mipmapLevel:level
+                 withBytes:g_uploadScratchBuffer.data()
+               bytesPerRow:size_t(mip.Width) * pixelSize];
+}
+
+void UpdateMetalTextureRect(id<MTLTexture> texture, const TextureInfo& info, int baseMip, int x, int y, int w, int h, bool masked)
+{
+    if (!texture || !info.Mips || baseMip >= info.NumMips || baseMip < 0) return;
+    auto uploader = GLTextureUploader::GetUploader(info.Format);
+    if (!uploader) return;
+    auto& base = info.Mips[baseMip];
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > base.Width || y + h > base.Height) return;
+    const size_t pixelSize = info.Format == TextureFormat::RGBA32_F ? 16 : 4;
+    size_t needed = size_t(w) * h * pixelSize;
+    if (g_uploadScratchBuffer.size() < needed) {
+        g_uploadScratchBuffer.resize(needed);
+    }
+    uploader->UploadRect(g_uploadScratchBuffer.data(), &base, x, y, w, h, info.Palette, masked);
+    [texture replaceRegion:MTLRegionMake2D(x, y, w, h)
+               mipmapLevel:0
+                 withBytes:g_uploadScratchBuffer.data()
+               bytesPerRow:size_t(w) * pixelSize];
+}
+
+id<MTLTexture> UploadOrUpdateMetalTexture(id<MTLDevice> device, id<MTLTexture> existing, const TextureInfo& info, int baseMip, bool masked)
+{
+    if (!info.Mips || baseMip < 0 || baseMip >= info.NumMips) throw std::runtime_error("Metal: invalid mip level");
+    auto uploader = GLTextureUploader::GetUploader(info.Format);
+    if (!uploader || (uploader->GetInternalformat() != GL_RGBA8 && uploader->GetInternalformat() != GL_RGBA32F))
+        throw std::runtime_error("Metal: unsupported texture format " + std::to_string(uint32_t(info.Format)));
+    auto& base = info.Mips[baseMip];
+    if (base.Width <= 0 || base.Height <= 0 || base.Width > 16384 || base.Height > 16384)
+        throw std::runtime_error("Metal: invalid texture dimensions");
+    int levels = 1;
+    for (int size = std::max(base.Width, base.Height); size > 1 && levels < info.NumMips - baseMip; size /= 2) ++levels;
+    const size_t pixelSize = info.Format == TextureFormat::RGBA32_F ? 16 : 4;
+    const size_t inputSize = info.Format == TextureFormat::P8 ? 1 : info.Format == TextureFormat::RGB8 ? 3 : pixelSize;
+    const auto format = info.Format == TextureFormat::BGRA8 ? MTLPixelFormatBGRA8Unorm : info.Format == TextureFormat::RGBA32_F ? MTLPixelFormatRGBA32Float : MTLPixelFormatRGBA8Unorm;
+
+    id<MTLTexture> result = existing;
+    if (!result || result.width != (NSUInteger)base.Width || result.height != (NSUInteger)base.Height || result.pixelFormat != format || result.mipmapLevelCount != (NSUInteger)levels) {
+        auto desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:base.Width height:base.Height mipmapped:levels > 1];
+        desc.mipmapLevelCount = levels; desc.storageMode = MTLStorageModeShared; desc.usage = MTLTextureUsageShaderRead;
+        result = [device newTextureWithDescriptor:desc];
+        if (!result) throw std::runtime_error("Metal: texture allocation failed");
+    }
+
+    for (int level = 0; level < levels; ++level) {
+        auto& mip = info.Mips[baseMip + level];
+        if (mip.Width != std::max(base.Width >> level, 1) || mip.Height != std::max(base.Height >> level, 1))
             throw std::runtime_error("Metal: inconsistent mip dimensions");
-        if (mip.Data.size()<size_t(mip.Width)*mip.Height*inputSize || (info.Format==TextureFormat::P8 && !info.Palette))
+        if (mip.Data.size() < size_t(mip.Width) * mip.Height * inputSize || (info.Format == TextureFormat::P8 && !info.Palette))
             throw std::runtime_error("Metal: truncated texture");
-        uploader->UploadRect(pixels.data(),&mip,0,0,mip.Width,mip.Height,info.Palette,masked);
-        [result replaceRegion:MTLRegionMake2D(0,0,mip.Width,mip.Height) mipmapLevel:level withBytes:pixels.data() bytesPerRow:size_t(mip.Width)*pixelSize];
+        UploadMetalMipLevel(result, uploader, info, baseMip + level, level, pixelSize, inputSize, masked);
     }
     return result;
+}
+
+[[maybe_unused]] id<MTLTexture> UploadMetalTexture(id<MTLDevice> device, const TextureInfo& info, int baseMip, bool masked)
+{
+    return UploadOrUpdateMetalTexture(device, nil, info, baseMip, masked);
 }
 
 float MetalGammaExponent(float brightness)
@@ -128,13 +177,18 @@ fragment float4 gammaPS(CompositeOut v [[stage_in]],texture2d<float> frame [[tex
 })";
 class MetalRenderDevice final : public RenderDevice {
     friend struct MetalRenderChecks;
+    static constexpr size_t MaxFramesInFlight = 3;
+    dispatch_semaphore_t inFlightSemaphore = nullptr;
+    bool frameLocked = false;
+    void* framePool = nullptr;
+
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
     CAMetalLayer* layer;
     id<CAMetalDrawable> drawable;
     id<MTLCommandBuffer> commands, lastSubmitted;
-    std::array<FrameVertices,2> verticesByFrame;
+    std::array<FrameVertices,MaxFramesInFlight> verticesByFrame;
     size_t frameIndex=0;
     id<MTLRenderCommandEncoder> encoder;
     id<MTLTexture> depth,white,lastFrame,worldColor,worldDepth;
@@ -168,7 +222,14 @@ class MetalRenderDevice final : public RenderDevice {
         const auto key=std::make_pair(info->CacheID,masked);
         auto found=textures.find(key);
         if (found!=textures.end() && found->second.mip==baseMip && !info->bRealtimeChanged) return found->second.texture;
-        auto result=UploadMetalTexture(device,*info,baseMip,masked);
+        id<MTLTexture> existing = (found!=textures.end() && found->second.mip==baseMip) ? found->second.texture : nil;
+        if (info->bRealtimeChanged && existing && info->UpdateWidth > 0) {
+            UpdateMetalTextureRect(existing, *info, baseMip, info->UpdateX, info->UpdateY, info->UpdateWidth, info->UpdateHeight, masked);
+            info->bRealtimeChanged = false;
+            return existing;
+        }
+        auto result=UploadOrUpdateMetalTexture(device,existing,*info,baseMip,masked);
+        info->bRealtimeChanged = false;
         textures[key]={baseMip,result};
         return result;
     }
@@ -199,7 +260,7 @@ class MetalRenderDevice final : public RenderDevice {
         pass.colorAttachments[0].clearColor=MTLClearColorMake(color.x,color.y,color.z,color.w);
         pass.depthAttachment.texture=worldPass ? worldDepth : depth;
         pass.depthAttachment.loadAction=clearDepth ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.depthAttachment.storeAction=MTLStoreActionStore; pass.depthAttachment.clearDepth=1;
+        pass.depthAttachment.storeAction=MTLStoreActionDontCare; pass.depthAttachment.clearDepth=1;
         encoder=[commands renderCommandEncoderWithDescriptor:pass];
         [encoder setCullMode:MTLCullModeNone];
         if (current) SetSceneNode(current);
@@ -264,6 +325,8 @@ class MetalRenderDevice final : public RenderDevice {
         if (!layer) throw std::runtime_error("Metal: no native layer");
         device=layer.device ?: MTLCreateSystemDefaultDevice(); layer.device=device;
         layer.pixelFormat=MTLPixelFormatBGRA8Unorm; layer.framebufferOnly=NO;
+        layer.maximumDrawableCount=MaxFramesInFlight;
+        inFlightSemaphore=dispatch_semaphore_create(MaxFramesInFlight);
         queue=[device newCommandQueue];
         NSError* error=nil; library=[device newLibraryWithSource:[NSString stringWithUTF8String:source] options:nil error:&error];
         if (!library) throw std::runtime_error(error.localizedDescription.UTF8String);
@@ -295,15 +358,37 @@ public:
     explicit MetalRenderDevice(Widget* viewport) : MetalRenderDevice((__bridge CAMetalLayer*)static_cast<CocoaNativeHandle*>(viewport->GetNativeHandle())->metalLayer) {
         Viewport=viewport;
     }
+    ~MetalRenderDevice() override {
+        if (inFlightSemaphore) {
+            for (size_t i = 0; i < MaxFramesInFlight; ++i) {
+                dispatch_semaphore_wait(inFlightSemaphore, DISPATCH_TIME_FOREVER);
+            }
+            for (size_t i = 0; i < MaxFramesInFlight; ++i) {
+                dispatch_semaphore_signal(inFlightSemaphore);
+            }
+        }
+    }
     void Flush(bool) override { flushDraws(); textures.clear(); }
     bool SupportsRenderScale() const override { return true; }
     void Lock(vec4 scale,vec4 fog,vec4 clear) override {
+        framePool=objc_autoreleasePoolPush();
         flashScale=scale;flashFog=fog;
-        verticesByFrame[frameIndex].reset();
         worldPass=worldRendering=false;
         renderRect=engine->window->GetRenderRect();
-        layer.drawableSize=CGSizeMake(std::max(1,engine->window->GetNativePixelWidth()),std::max(1,engine->window->GetNativePixelHeight()));
-        drawable=[layer nextDrawable]; if (!drawable) return;
+        CGSize targetSize=CGSizeMake(std::max(1,engine->window->GetNativePixelWidth()),std::max(1,engine->window->GetNativePixelHeight()));
+        if (layer.drawableSize.width!=targetSize.width || layer.drawableSize.height!=targetSize.height) {
+            layer.drawableSize=targetSize;
+        }
+        dispatch_semaphore_wait(inFlightSemaphore, DISPATCH_TIME_FOREVER);
+        frameLocked=true;
+        verticesByFrame[frameIndex].reset();
+        drawable=[layer nextDrawable];
+        if (!drawable) {
+            frameLocked=false;
+            dispatch_semaphore_signal(inFlightSemaphore);
+            if (framePool) { objc_autoreleasePoolPop(framePool); framePool=nullptr; }
+            return;
+        }
         auto t=drawable.texture;
         if (!depth || depth.width!=t.width || depth.height!=t.height) {
             auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:t.width height:t.height mipmapped:NO];
@@ -313,18 +398,37 @@ public:
         commands=[queue commandBuffer]; current=nullptr; beginPass(true,true,engine->classicAspectRatio ? vec4(0,0,0,1) : clear);
     }
     void Unlock(bool blit) override {
-        if (!commands) return;
+        if (!commands) {
+            if (framePool) { objc_autoreleasePoolPop(framePool); framePool=nullptr; }
+            return;
+        }
         flushDraws();
         [encoder endEncoding]; encoder=nil;
         applyGamma();
         lastFrame=drawable.texture; lastFrameRect=renderRect;
+        lastSubmitted = commands;
+        if (frameLocked) {
+            frameLocked = false;
+            dispatch_semaphore_t sem = inFlightSemaphore;
+            [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+                if (buffer.error) {
+                    fprintf(stderr,"Metal error: %s\n",buffer.error.localizedDescription.UTF8String);
+                }
+                dispatch_semaphore_signal(sem);
+            }];
+        }
         if (blit) [commands presentDrawable:drawable];
         [commands commit];
-        verticesByFrame[frameIndex].submitted=commands;
-        frameIndex=(frameIndex+1)%verticesByFrame.size();
-        lastSubmitted = commands;
-        if (!frameReported) { fprintf(stderr,"Metal frame submitted: %lux%lu; display sync; at most two GPU frames in flight\n",(unsigned long)lastFrame.width,(unsigned long)lastFrame.height);frameReported=true; }
+        frameIndex=(frameIndex+1)%MaxFramesInFlight;
+        if (!frameReported) {
+            fprintf(stderr,"Metal frame submitted: %lux%lu; triple-buffered display sync; %zu GPU frames in flight\n",(unsigned long)lastFrame.width,(unsigned long)lastFrame.height,MaxFramesInFlight);
+            frameReported=true;
+        }
         commands=nil;drawable=nil;current=nullptr;
+        if (framePool) {
+            objc_autoreleasePoolPop(framePool);
+            framePool=nullptr;
+        }
     }
     void BeginWorld() {
         worldRendering=true;
@@ -430,8 +534,10 @@ public:
     void ClearZ() override { if(encoder) { flushDraws(); [encoder endEncoding];beginPass(false,true); } }
     void ReadPixels(TextureColor* pixels) override {
         if (!lastFrame || !pixels) return;
-        [lastSubmitted waitUntilCompleted];
-        if (lastSubmitted.error) throw std::runtime_error(lastSubmitted.error.localizedDescription.UTF8String);
+        if (lastSubmitted) {
+            [lastSubmitted waitUntilCompleted];
+            if (lastSubmitted.error) throw std::runtime_error(lastSubmitted.error.localizedDescription.UTF8String);
+        }
         [lastFrame getBytes:pixels bytesPerRow:NSUInteger(lastFrameRect.width)*4 fromRegion:MTLRegionMake2D(lastFrameRect.x,lastFrameRect.y,lastFrameRect.width,lastFrameRect.height) mipmapLevel:0];
         for(size_t i=0;i<size_t(lastFrameRect.width)*size_t(lastFrameRect.height);++i) std::swap(pixels[i].R,pixels[i].B);
     }
