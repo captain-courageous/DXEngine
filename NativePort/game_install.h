@@ -69,16 +69,23 @@ inline void PrepareDeusExInstall(const fs::path& selected, const fs::path& game)
             link(entry.path(), target);
         }
     }
-    auto config = game/"System/SE-DeusEx.ini";
-    const bool fresh = !fs::exists(config);
-    IniFile ini((fresh ? game/"System/Default.ini" : config).string());
-    ini.SetValues("Core.System", "Paths", {"../System/*.u", "../Maps/*.dx", "../Textures/*.utx", "../Sounds/*.uax", "../Music/*.umx"});
-    ini.SetValue("Core.System", "SavePath", "../Save");
-    ini.SetValue("Core.System", "CachePath", "../Cache");
-    if (fresh) {
-        ini.SetValue("Engine.SurrealClient", "StartupFullscreen", "True");
-        ini.SetValue("Engine.SurrealClient", "WindowedViewportX", "1280");
-        ini.SetValue("Engine.SurrealClient", "WindowedViewportY", "720");
+    for (const auto& [file, clientSection] : {
+        std::pair{"System/SE-DeusEx.ini", "Engine.SurrealClient"},
+        std::pair{"System/DXE-DeusEx.ini", "Engine.DXEngineClient"}
+    }) {
+        auto config = game/file;
+        const bool fresh = !fs::exists(config);
+        IniFile ini((fresh ? game/"System/Default.ini" : config).string());
+        ini.SetValues("Core.System", "Paths", {"../System/*.u", "../Maps/*.dx", "../Textures/*.utx", "../Sounds/*.uax", "../Music/*.umx"});
+        ini.SetValue("Core.System", "SavePath", "../Save");
+        ini.SetValue("Core.System", "CachePath", "../Cache");
+        if (fresh) {
+            ini.SetValue(clientSection, "StartupFullscreen", "True");
+            ini.SetValue(clientSection, "WindowedViewportX", "1280");
+            ini.SetValue(clientSection, "WindowedViewportY", "720");
+            ini.SetValue(clientSection, "FullscreenViewportX", "0");
+            ini.SetValue(clientSection, "FullscreenViewportY", "0");
+        }
+        if (fresh || ini.IsModified()) ini.SaveTo(config.string());
     }
-    if (fresh || ini.IsModified()) ini.SaveTo(config.string());
 }

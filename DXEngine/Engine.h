@@ -276,7 +276,11 @@ public:
 	// it names one; else the device the game's ini names (GameRenderDevice):
 	// the software device for SoftDrv's, the Vulkan device for any other
 	RenderDeviceType ChooseRenderDevice();
+#ifdef __APPLE__
+	RenderDeviceType chosenRenderDevice = RenderDeviceType::Metal;
+#else
 	RenderDeviceType chosenRenderDevice = RenderDeviceType::Vulkan;
+#endif
 	// The window for it; where its GPU device does not start, the software
 	// device's, the error logged
 	std::unique_ptr<GameWindow> CreateGameWindow(RenderDeviceType type);

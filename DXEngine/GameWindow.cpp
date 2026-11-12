@@ -42,12 +42,20 @@ Rect GameWindow::GetRenderRect()
 // the scene smaller and scales it up (RenderDevice::GetRenderScale).
 int GameWindow::GetPixelWidth()
 {
+#ifdef __APPLE__
+	return (int)GetRenderRect().width;
+#else
 	return device ? device->GetRenderWidth() : GetNativePixelWidth();
+#endif
 }
 
 int GameWindow::GetPixelHeight()
 {
+#ifdef __APPLE__
+	return (int)GetRenderRect().height;
+#else
 	return device ? device->GetRenderHeight() : GetNativePixelHeight();
+#endif
 }
 
 void GameWindow::ToggleWindowFullscreen(Size newResolution)

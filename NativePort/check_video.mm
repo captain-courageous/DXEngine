@@ -281,6 +281,7 @@ int main(int argc, char** argv)
     GameFolderSelection::UpdateList();
     auto* game = new Engine(GameFolderSelection::GetLaunchInfo(0));
     game->LoadEngineSettings();
+    assert(game->ChooseRenderDevice() == RenderDeviceType::Metal);
     auto* transient = game->packages->GetTransientPackage();
     auto make = [&](const char* name, const char* cls) { return transient->NewObject(name, game->packages->FindClass(cls), ObjectFlags::Transient); };
     auto* player = make("video-player", "DeusEx.DeusExPlayer");

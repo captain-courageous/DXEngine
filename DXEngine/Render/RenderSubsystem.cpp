@@ -101,8 +101,10 @@ void RenderSubsystem::DrawGame(float levelTimeElapsed)
 		UPlayerPawn* viewer = engine->viewport->Actor();
 		if (viewer && viewer->XLevel() == engine->Level && (!engine->dxRootWindow || engine->dxRootWindow->bRender()))
 		{
+			Device->BeginWorld();
 			DrawScene();
 			RenderOverlays();
+			Device->EndWorld();
 			Device->TakeBloom();
 		}
 		PostRenderFlash();

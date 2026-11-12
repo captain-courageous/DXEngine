@@ -568,12 +568,10 @@ UWindow* URootWindow::MouseHolder()
 
 bool URootWindow::OnWindowMouseMove(const Point& pos)
 {
-	if (IsCursorVisible() && !bMouseMoveLocked())
-	{
-		float scale = GetVirtualScale();
-		if (scale > 0.0f)
-			SetRootCursorPos((float)pos.x / scale - UsedX, (float)pos.y / scale - UsedY);
-	}
+#if 0 // We currently handle this in OnWindowRawMouseMove
+	if (IsCursorVisible())
+		SetRootCursorPos((float)pos.x / scale, (float)pos.y / scale);
+#endif
 	return IsMouseGrabbed();
 }
 

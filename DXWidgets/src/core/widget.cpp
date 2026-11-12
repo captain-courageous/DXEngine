@@ -544,7 +544,7 @@ void Widget::UnlockKeyboard()
 void Widget::LockCursor()
 {
 	Widget* w = Window();
-	if (w && w->CursorLockWidget != this)
+	if (w)
 	{
 		w->CursorLockWidget = this;
 		w->DispWindow->LockCursor();

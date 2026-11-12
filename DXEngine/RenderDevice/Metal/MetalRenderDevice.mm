@@ -369,7 +369,6 @@ public:
         }
     }
     void Flush(bool) override { flushDraws(); textures.clear(); }
-    bool SupportsRenderScale() const override { return true; }
     void Lock(vec4 scale,vec4 fog,vec4 clear) override {
         framePool=objc_autoreleasePoolPush();
         flashScale=scale;flashFog=fog;
@@ -430,7 +429,7 @@ public:
             framePool=nullptr;
         }
     }
-    void BeginWorld() {
+    void BeginWorld() override {
         worldRendering=true;
         if (!encoder || engine->renderScale>=1.0f) return;
         flushDraws();
@@ -447,7 +446,7 @@ public:
         }
         worldPass=true; beginPass(true,true,vec4(0,0,0,1));
     }
-    void EndWorld() {
+    void EndWorld() override {
         worldRendering=false;
         if (!worldPass) return;
         flushDraws();
@@ -507,7 +506,20 @@ public:
             Vertex next=vertex(i); *out++=first; *out++=previous; *out++=next; previous=next;
         }
     }
+    void DrawGouraudTriangles(SceneNode* frame,TextureInfo& info,const GouraudVertex* p,int numTris,uint32_t flags) override {
+        if (numTris<=0) return; if (current!=frame) SetSceneNode(frame);
+        const bool fog=(flags&(PF_RenderFog|PF_Translucent|PF_Modulated))==PF_RenderFog;
+        size_t count=size_t(numTris)*3;
+        Vertex* out=reserveDraw(count,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,fog);
+        if (!out) return;
+        float um=GetUMult(info),vm=GetVMult(info);
+        for(size_t i=0;i<count;++i) {
+            out[i]=Vertex{transform*vec4(p[i].Point,1),(flags&PF_Modulated) ? vec4(1) : vec4(p[i].Light,1),{p[i].UV.x*um,p[i].UV.y*vm},{},{},{},p[i].Fog};
+        }
+        info.bRealtimeChanged=false;
+    }
     void DrawTile(SceneNode* frame,TextureInfo& info,float x,float y,float w,float h,float u,float v,float ul,float vl,float z,vec4 color,vec4,uint32_t flags) override {
+        flags=TileFlags(info,flags);
         if (current!=frame) SetSceneNode(frame);
         if (flags&PF_Modulated) color=vec4(1);
         u*=GetUMult(info);ul*=GetUMult(info);v*=GetVMult(info);vl*=GetVMult(info);
@@ -532,6 +544,10 @@ public:
         }
     }
     void ClearZ() override { if(encoder) { flushDraws(); [encoder endEncoding];beginPass(false,true); } }
+    void LastFrameSize(int& width,int& height) const override {
+        width=lastFrame ? int(lastFrameRect.width) : 0;
+        height=lastFrame ? int(lastFrameRect.height) : 0;
+    }
     void ReadPixels(TextureColor* pixels) override {
         if (!lastFrame || !pixels) return;
         if (lastSubmitted) {

@@ -199,6 +199,8 @@ public:
 	// taken from them now, the HUD's and the menus' windows drawn after it
 	// left sharp, and added to the frame whole at Unlock. A device without
 	// a bloom draws on.
+	virtual void BeginWorld() { }
+	virtual void EndWorld() { }
 	virtual void TakeBloom() { }
 	virtual void SetSceneNode(SceneNode* Frame) = 0;
 	virtual void PrecacheTexture(TextureInfo& Info, uint32_t PolyFlags) = 0;

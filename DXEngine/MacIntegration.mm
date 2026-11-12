@@ -121,8 +121,6 @@ void Engine::InitializeMacIntegration()
     auto full = [windows addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
     full.target = handle->nsWindow; full.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
     [NSApp setMainMenu:bar]; [NSApp setWindowsMenu:windows];
-    [NSApp activateIgnoringOtherApps:YES];
-    [handle->nsWindow makeKeyAndOrderFront:nil];
     fprintf(stderr, "macOS integration initialized: render=%.2f UI=%.2f controller=%d bundle=%s GameModeOptIn=%d\n", renderScale, interfaceScale, (int)LauncherSettings::Get().Gamepad.Enabled, NSBundle.mainBundle.bundleIdentifier.UTF8String, [NSBundle.mainBundle.infoDictionary[@"LSSupportsGameMode"] boolValue]);
 }
 
@@ -144,10 +142,6 @@ void Engine::PollMacStatus()
                 void* handle = window->GetNativeHandle();
                 if (handle) {
                     NSWindow* nsWindow = static_cast<CocoaNativeHandle*>(handle)->nsWindow;
-                    if (nsWindow && (!NSApp.active || !nsWindow.keyWindow)) {
-                        [NSApp activateIgnoringOtherApps:YES];
-                        [nsWindow makeKeyAndOrderFront:nil];
-                    }
                     std::string status = "active=" + std::to_string(NSApp.active) + " key=" + std::to_string(nsWindow.keyWindow)
                         + " fullscreen=" + std::to_string(bool(nsWindow.styleMask & NSWindowStyleMaskFullScreen))
                         + " appRunning=" + std::to_string(NSApp.running) + " gameMode=" + std::to_string(gameMode)

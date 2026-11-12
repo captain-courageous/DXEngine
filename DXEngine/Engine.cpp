@@ -3562,14 +3562,14 @@ RenderDeviceType Engine::ChooseRenderDevice()
 		LogMessage("GameRenderDevice=SoftDrv.SoftwareRenderDevice: the software device");
 		return RenderDeviceType::Software;
 	}
-	return RenderDeviceType::Vulkan;
+	return settings.Type;
 }
 
 std::unique_ptr<GameWindow> Engine::CreateGameWindow(RenderDeviceType type)
 {
 	if (type != RenderDeviceType::Software)
 	{
-		const char* name = type == RenderDeviceType::D3D11 ? "D3D11" : type == RenderDeviceType::OpenGL ? "GL" : type == RenderDeviceType::GLES ? "GL ES" : "Vulkan";
+		const char* name = type == RenderDeviceType::Metal ? "Metal" : type == RenderDeviceType::D3D11 ? "D3D11" : type == RenderDeviceType::OpenGL ? "GL" : type == RenderDeviceType::GLES ? "GL ES" : "Vulkan";
 #ifndef WIN32
 		// Mesa's CPU driver for GL, llvmpipe, chosen before GL is loaded
 		if (LauncherSettings::Get().RenderDevice.CPUDriver && (type == RenderDeviceType::OpenGL || type == RenderDeviceType::GLES))
@@ -3635,8 +3635,10 @@ void Engine::OpenWindow()
 	// system puts a new one, as the original's (WinDrv's OpenWindow,
 	// CW_USEDEFAULT), its title bar on the screen
 	double dpi = window->GetDpiScale();
-	window->SetFrameSize(Size(width / dpi, height / dpi));
-	viewport->SetViewportRect(0, 0, width, height);
+	int frameWidth = width > 0 ? width : client->WindowedViewportX;
+	int frameHeight = height > 0 ? height : client->WindowedViewportY;
+	window->SetFrameSize(Size(frameWidth / dpi, frameHeight / dpi));
+	viewport->SetViewportRect(0, 0, frameWidth, frameHeight);
 	if (!fullscreen)
 		AskWindowSize(width, height);
 
@@ -3980,6 +3982,8 @@ void Engine::OnWindowActivated()
 void Engine::OnWindowDeactivated()
 {
 	//SetPause(true);
+	if (window)
+		window->UnlockCursor();
 	if (dxRootWindow)
 		dxRootWindow->ForgetKeys();
 }

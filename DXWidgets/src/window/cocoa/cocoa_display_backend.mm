@@ -52,12 +52,11 @@ CocoaDisplayBackend::CocoaDisplayBackend()
     [NSApplication sharedApplication];
 
     // Only configure NSApp if we're the owner (no delegate set yet)
-    if ([NSApp delegate] == nil)
+    if ([NSApp delegate] == nil && !NSApp.running)
     {
         // We're the primary app - set activation policy for keyboard events
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
-        [NSApp activateIgnoringOtherApps:YES];
     }
     // else: Parent app is managing NSApp lifecycle, don't interfere
 }
@@ -73,16 +72,9 @@ std::unique_ptr<DisplayWindow> CocoaDisplayBackend::Create(DisplayWindowHost* wi
 
 void CocoaDisplayBackend::ProcessEvents()
 {
-    @autoreleasepool {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, false);
-        while (NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSEventTrackingRunLoopMode dequeue:YES])
-        {
-            [NSApp sendEvent:event];
-        }
-        while (NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])
-        {
-            [NSApp sendEvent:event];
-        }
+    while (NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])
+    {
+        [NSApp sendEvent:event];
     }
 }
 
