@@ -63,6 +63,7 @@ int RunMacGame(const std::function<int()>& runGame)
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp activateIgnoringOtherApps:YES];
         __block int result = 1;
         __block std::exception_ptr failure;
         // Enter from a run-loop timer so nested event pumping can still service the main dispatch queue.

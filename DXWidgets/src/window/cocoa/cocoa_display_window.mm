@@ -369,7 +369,7 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
     }
 
     trackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
-                                                options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+                                                options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
                                                   owner:self
                                                userInfo:nil];
     [self addTrackingArea:trackingArea];
@@ -502,7 +502,15 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
     {
         if (impl->cursorLocked)
         {
-            impl->windowHost->OnWindowRawMouseMove((int)[theEvent deltaX], (int)[theEvent deltaY]);
+            static double accumX = 0.0, accumY = 0.0;
+            accumX += [theEvent deltaX];
+            accumY += [theEvent deltaY];
+            int dx = (int)accumX;
+            int dy = (int)accumY;
+            accumX -= dx;
+            accumY -= dy;
+            if (dx != 0 || dy != 0)
+                impl->windowHost->OnWindowRawMouseMove(dx, dy);
         }
         else
         {
@@ -519,6 +527,11 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
 
 - (void)mouseDown:(NSEvent *)theEvent
 {
+    if (self.window && !self.window.isKeyWindow)
+    {
+        [NSApp activateIgnoringOtherApps:YES];
+        [self.window makeKeyAndOrderFront:nil];
+    }
     if (impl && impl->windowHost)
     {
         NSPoint p = [self convertPoint:[theEvent locationInWindow] fromView:nil];
@@ -731,7 +744,7 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
 
 - (void)windowDidBecomeKey:(NSNotification *)notification
 {
-    if (impl->windowHost && impl->window.isKeyWindow && NSApp.active) impl->windowHost->OnWindowActivated();
+    if (impl->windowHost) impl->windowHost->OnWindowActivated();
 }
 
 - (void)windowDidResize:(NSNotification *)notification
@@ -750,7 +763,13 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification { [self windowDidChangeScreen:notification]; }
-- (void)windowDidEnterFullScreen:(NSNotification *)notification { fprintf(stderr, "macOS native fullscreen: entered\n"); [self windowDidChangeScreen:notification]; }
+- (void)windowDidEnterFullScreen:(NSNotification *)notification
+{
+    fprintf(stderr, "macOS native fullscreen: entered\n");
+    [self windowDidChangeScreen:notification];
+    [NSApp activateIgnoringOtherApps:YES];
+    if (impl && impl->window) [impl->window makeKeyAndOrderFront:nil];
+}
 - (void)windowDidExitFullScreen:(NSNotification *)notification { fprintf(stderr, "macOS native fullscreen: exited\n"); [self windowDidChangeScreen:notification]; }
 - (void)windowDidMiniaturize:(NSNotification *)notification { [self windowDidResignKey:notification]; }
 - (void)windowDidDeminiaturize:(NSNotification *)notification { [self windowDidBecomeKey:notification]; }
@@ -1026,7 +1045,12 @@ void CocoaDisplayWindow::ShowFullscreen()
 {
     if (impl->window)
     {
-        [impl->window toggleFullScreen:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        [impl->window makeKeyAndOrderFront:nil];
+        if (!([impl->window styleMask] & NSWindowStyleMaskFullScreen))
+        {
+            [impl->window toggleFullScreen:nil];
+        }
     }
 }
 
@@ -1050,6 +1074,8 @@ void CocoaDisplayWindow::ShowNormal()
 {
     if (impl->window)
     {
+        [NSApp activateIgnoringOtherApps:YES];
+        [impl->window makeKeyAndOrderFront:nil];
         if ([impl->window isMiniaturized])
         {
             [impl->window deminiaturize:nil];
@@ -1162,8 +1188,13 @@ void CocoaDisplayWindow::UnlockKeyboard() {}
 
 void CocoaDisplayWindow::LockCursor()
 {
-    if (impl->window && impl->window.isKeyWindow && !impl->cursorLocked)
+    if (impl->window && !impl->cursorLocked)
     {
+        if (!impl->window.isKeyWindow)
+        {
+            [NSApp activateIgnoringOtherApps:YES];
+            [impl->window makeKeyAndOrderFront:nil];
+        }
         // Keep the detached pointer inside the view so AppKit routes mouse events here.
         NSView* view = impl->window.contentView;
         NSPoint center = NSMakePoint(NSMidX(view.bounds), NSMidY(view.bounds));
