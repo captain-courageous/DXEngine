@@ -16,6 +16,13 @@ public:
 	{
 		const auto pk3PathStr = (fs::path{ OS::executable_path() } / "DXEngine.pk3").string();
 		mz_bool result = mz_zip_reader_init_file(&widgetResources, pk3PathStr.c_str(), 0);
+#ifdef __APPLE__
+		if (!result)
+		{
+			const auto bundlePk3 = (fs::path{ OS::executable_path() } / "../Resources/DXEngine.pk3").string();
+			result = mz_zip_reader_init_file(&widgetResources, bundlePk3.c_str(), 0);
+		}
+#endif
 #ifndef WIN32
 		// On Linux, DXEngine.pk3 can additionally be put in some other folders given below.
 		if (!result)

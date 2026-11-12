@@ -16,6 +16,9 @@
 #include <dirent.h>
 #include <cstdio>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 #include "Utils/Exception.h"
 #include <cstring>
@@ -466,6 +469,15 @@ std::string OS::executable_path()
 	_wsplitpath_s(exe_filename, drive, _MAX_DRIVE, dir, _MAX_DIR, NULL, 0, NULL, 0);
 
 	return from_utf16(std::wstring(drive) + dir);
+#elif defined(__APPLE__)
+	char exe_file[PATH_MAX];
+	uint32_t size = sizeof(exe_file);
+	if (_NSGetExecutablePath(exe_file, &size) != 0)
+		Exception::Throw("_NSGetExecutablePath failed!");
+	char real_path[PATH_MAX];
+	if (!realpath(exe_file, real_path))
+		Exception::Throw("realpath failed!");
+	return std::string(dirname(real_path)) + "/";
 #else
 	#ifndef PROC_EXE_PATH
 	#define PROC_EXE_PATH "/proc/self/exe"

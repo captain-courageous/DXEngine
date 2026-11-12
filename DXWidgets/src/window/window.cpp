@@ -94,6 +94,10 @@ std::unique_ptr<DisplayBackend> DisplayBackend::TryCreateBackend()
 		{
 			backend = TryCreateWin32();
 		}
+		else if (backendSelectionStr == "Cocoa")
+		{
+			backend = TryCreateCocoa();
+		}
 		else if (backendSelectionStr == "X11")
 		{
 			backend = TryCreateX11();
@@ -110,7 +114,10 @@ std::unique_ptr<DisplayBackend> DisplayBackend::TryCreateBackend()
 
 	if (!backend)
 	{
-#ifdef WIN32
+#ifdef __APPLE__
+		backend = TryCreateCocoa();
+		if (!backend) backend = TryCreateSDL3();
+#elif defined(WIN32)
 		// SDL3's window before Windows' own where it is built: the Win32 one
 		// has none of what the engine's window has since gained -- the
 		// display modes, the pad, a timeline's keys.
@@ -249,4 +256,20 @@ std::unique_ptr<DisplayBackend> DisplayBackend::TryCreateWayland()
 }
 
 #endif
+
+#ifdef __APPLE__
+
+#include "cocoa/cocoa_display_backend.h"
+
+// DisplayBackend::TryCreateCocoa() is defined in cocoa_display_backend.mm
+
+#else
+
+std::unique_ptr<DisplayBackend> DisplayBackend::TryCreateCocoa()
+{
+	return nullptr;
+}
+
+#endif
+
 

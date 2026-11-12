@@ -1,5 +1,8 @@
 
 #include "Precomp.h"
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include "Utils/Exception.h"
 #include "Utils/Logger.h"
 #include "Utils/CommandLine.h"
@@ -199,6 +202,14 @@ void GameApp::Relaunch(const Array<std::string>& args, const std::string& line)
 
 #ifndef _WIN32
 	char path[4096];
+#ifdef __APPLE__
+	uint32_t path_size = sizeof(path);
+	if (_NSGetExecutablePath(path, &path_size) != 0)
+	{
+		std::cerr << "Relaunch: the engine's own path is unknown" << std::endl;
+		return;
+	}
+#else
 	ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
 	if (length <= 0)
 	{
@@ -206,6 +217,7 @@ void GameApp::Relaunch(const Array<std::string>& args, const std::string& line)
 		return;
 	}
 	path[length] = 0;
+#endif
 	std::vector<char*> argv;
 	argv.push_back(path);
 	for (std::string& arg : next)

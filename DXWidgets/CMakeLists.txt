@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.11)
 project(dxwidgets)
 
+option(ENABLE_METAL "Enable Metal support for application rendering" ON)
+
 if(WIN32)
 	option(ENABLE_SDL3 "Enable SDL3 backend. Optional on all platforms" OFF)
 	option(ENABLE_SDL2 "Enable SDL2 backend. Optional on all platforms" OFF)
@@ -13,8 +15,13 @@ endif()
 # X11, no Wayland compositor, no dbus and no desktop GL. Turning those backends
 # off lets the library build against such a sysroot; window.cpp already has
 # null-returning stubs for every backend whose USE_* define is absent.
-option(ENABLE_X11 "Enable the X11 display backend" ON)
-option(ENABLE_WAYLAND "Enable the Wayland display backend" ON)
+if(APPLE)
+	option(ENABLE_X11 "Enable the X11 display backend" OFF)
+	option(ENABLE_WAYLAND "Enable the Wayland display backend" OFF)
+else()
+	option(ENABLE_X11 "Enable the X11 display backend" ON)
+	option(ENABLE_WAYLAND "Enable the Wayland display backend" ON)
+endif()
 
 # SDL2's fullscreen as a borderless window covering the display, set up while
 # the window is hidden, in place of SDL_SetWindowFullscreen: a vendor SDL2 (the
@@ -22,7 +29,7 @@ option(ENABLE_WAYLAND "Enable the Wayland display backend" ON)
 # Off, it is SDL's own FULLSCREEN_DESKTOP.
 option(DXE_SDL2_BORDERLESS_FULLSCREEN "SDL2 fullscreen as a borderless window, for a vendor SDL2 that deadlocks in SDL_SetWindowFullscreen" OFF)
 
-if (UNIX)
+if (UNIX AND NOT APPLE)
 	include(FindPkgConfig)
 	if (ENABLE_X11 OR ENABLE_WAYLAND)
 		pkg_check_modules(DBUS dbus-1)
@@ -208,6 +215,18 @@ set(DXWIDGETS_UNIX_SOURCES
 	src/core/resourcedata_unix.cpp
 )
 
+set(DXWIDGETS_COCOA_SOURCES
+	src/core/resourcedata_mac.mm
+)
+
+set(DXWIDGETS_COCOA_ARC_SOURCES
+	src/window/cocoa/cocoa_open_file_dialog.mm
+	src/window/cocoa/cocoa_save_file_dialog.mm
+	src/window/cocoa/cocoa_open_folder_dialog.mm
+	src/window/cocoa/cocoa_display_backend.mm
+	src/window/cocoa/cocoa_display_window.mm
+)
+
 set(DXWIDGETS_SDL2_SOURCES
 	src/window/sdl2/sdl2_display_backend.cpp
 	src/window/sdl2/sdl2_display_backend.h
@@ -325,6 +344,33 @@ if(WIN32)
 		# Ignore warning about legacy CRT functions
 		#set(DXWIDGETS_DEFINES ${DXWIDGETS_DEFINES} -D_CRT_SECURE_NO_WARNINGS)
 	endif()
+elseif(APPLE)
+	list(APPEND DXWIDGETS_SOURCES ${DXWIDGETS_COCOA_SOURCES} ${DXWIDGETS_COCOA_ARC_SOURCES})
+	set_source_files_properties(${DXWIDGETS_COCOA_ARC_SOURCES} PROPERTIES COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
+	set(DXWIDGETS_LIBS ${CMAKE_DL_LIBS} -ldl)
+	set(DXWIDGETS_DEFINES -DUNIX -D_UNIX)
+	set(DXWIDGETS_LINK_OPTIONS -pthread)
+
+	find_library(COCOA_FRAMEWORK Cocoa)
+	if (NOT COCOA_FRAMEWORK)
+		message(FATAL_ERROR "Cocoa framework not found")
+	endif()
+
+	find_library(COREVIDEO_FRAMEWORK CoreVideo)
+	if (NOT COREVIDEO_FRAMEWORK)
+		message(FATAL_ERROR "CoreVideo framework not found")
+	endif()
+
+	find_library(UNIFORMTYPEIDENTIFIERS_FRAMEWORK UniformTypeIdentifiers)
+
+	find_library(QUARTZCORE_FRAMEWORK QuartzCore)
+	if (NOT QUARTZCORE_FRAMEWORK)
+		message(FATAL_ERROR "QuartzCore framework not found")
+	endif()
+
+	if(ENABLE_METAL)
+		find_library(METAL_FRAMEWORK Metal)
+	endif()
 else()
 	set(DXWIDGETS_SOURCES ${DXWIDGETS_SOURCES} ${DXWIDGETS_UNIX_SOURCES})
 	set(DXWIDGETS_LIBS ${CMAKE_DL_LIBS})
@@ -387,7 +433,15 @@ target_compile_options(dxwidgets PRIVATE ${DXWIDGETS_COMPILE_OPTIONS})
 target_compile_definitions(dxwidgets PRIVATE ${DXWIDGETS_DEFINES})
 target_include_directories(dxwidgets PRIVATE ${DXWIDGETS_INCLUDE_DIRS})
 target_link_options(dxwidgets PRIVATE ${DXWIDGETS_LINK_OPTIONS})
-target_link_libraries(dxwidgets PRIVATE ${DXWIDGETS_LIBS})
+if(APPLE)
+	target_link_libraries(dxwidgets PRIVATE ${DXWIDGETS_LIBS} ${COCOA_FRAMEWORK} ${COREVIDEO_FRAMEWORK} ${UNIFORMTYPEIDENTIFIERS_FRAMEWORK} ${QUARTZCORE_FRAMEWORK})
+	if(ENABLE_METAL AND METAL_FRAMEWORK)
+		target_link_libraries(dxwidgets PRIVATE ${METAL_FRAMEWORK} ${QUARTZCORE_FRAMEWORK})
+		target_compile_definitions(dxwidgets PRIVATE HAVE_METAL)
+	endif()
+else()
+	target_link_libraries(dxwidgets PRIVATE ${DXWIDGETS_LIBS})
+endif()
 # SDL can arrive either from find_package (which defines the imported target
 # and SDLn_LIBRARY) or from pkg-config (which defines SDLn_LIBRARIES instead).
 # Cross builds take the pkg-config path, where SDLn_LIBRARY is empty -- so try

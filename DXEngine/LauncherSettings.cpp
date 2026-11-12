@@ -33,7 +33,9 @@ LauncherSettings::LauncherSettings()
 			RenderDevice.Type = RenderDeviceType::GLES;
 		else if (rendevtype == "Software")
 			RenderDevice.Type = RenderDeviceType::Software;
-		RenderDevice.TypeNamed = rendevtype == "Vulkan" || rendevtype == "D3D11" || rendevtype == "OpenGL" || rendevtype == "GLES" || rendevtype == "Software";
+		else if (rendevtype == "Metal")
+			RenderDevice.Type = RenderDeviceType::Metal;
+		RenderDevice.TypeNamed = rendevtype == "Vulkan" || rendevtype == "D3D11" || rendevtype == "OpenGL" || rendevtype == "GLES" || rendevtype == "Software" || rendevtype == "Metal";
 		RenderDevice.CPUDriver = settings["RenderDevice"]["CPUDriver"].to_boolean();
 
 		std::string rendevaa = settings["RenderDevice"]["Antialias"].to_string();

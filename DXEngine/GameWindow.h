@@ -126,6 +126,9 @@ public:
 
 	RenderDevice* GetRenderDevice();
 
+	static Rect FitRenderRect(int width, int height, bool classicAspectRatio);
+	Rect GetRenderRect();
+
 	int GetPixelWidth();
 	int GetPixelHeight();
 

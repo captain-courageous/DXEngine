@@ -8,6 +8,9 @@
 #ifdef WIN32
 #include "D3D11/D3D11RenderDevice.h"
 #endif
+#ifdef __APPLE__
+std::unique_ptr<RenderDevice> CreateMetalRenderDevice(Widget* viewport);
+#endif
 #include "Packages/Engine/Resources/Level/ULevel.h"
 #include "Packages/Engine/Resources/Level/UModel.h"
 #include <dxwidgets/core/colorf.h>
@@ -97,6 +100,12 @@ void RenderDevice::TenBitRowToBytes(const uint32_t* src, TextureColor* dest, int
 
 std::unique_ptr<RenderDevice> RenderDevice::Create(Widget* viewport, RenderAPI renderAPI)
 {
+#ifdef __APPLE__
+	if (renderAPI == RenderAPI::Metal || renderAPI == RenderAPI::Unspecified)
+	{
+		return CreateMetalRenderDevice(viewport);
+	}
+#endif
 	if (renderAPI == RenderAPI::Vulkan)
 	{
 		return std::make_unique<VulkanRenderDevice>(viewport);

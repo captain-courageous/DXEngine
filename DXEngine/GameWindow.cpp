@@ -2,6 +2,7 @@
 #include "Precomp.h"
 #include "GameWindow.h"
 #include "LauncherSettings.h"
+#include "Engine.h"
 #include "RenderDevice/RenderDevice.h"
 #include <dxgpu/vulkansurface.h>
 #include <dxgpu/vulkancompatibledevice.h>
@@ -17,6 +18,24 @@ GameWindow::GameWindow(GameWindowHost* windowHost, RenderAPI renderAPI) : Widget
 RenderDevice* GameWindow::GetRenderDevice()
 {
 	return device.get();
+}
+
+Rect GameWindow::FitRenderRect(int width, int height, bool classicAspectRatio)
+{
+	width = std::max(width, 1);
+	height = std::max(height, 1);
+	if (!classicAspectRatio || width < 4 || height < 3) return {0, 0, double(width), double(height)};
+	const int unit = std::min(width / 4, height / 3);
+	return {double((width - unit * 4) / 2), double((height - unit * 3) / 2), double(unit * 4), double(unit * 3)};
+}
+
+Rect GameWindow::GetRenderRect()
+{
+#ifdef __APPLE__
+	return FitRenderRect(GetNativePixelWidth(), GetNativePixelHeight(), engine ? engine->classicAspectRatio : false);
+#else
+	return {0, 0, double(GetNativePixelWidth()), double(GetNativePixelHeight())};
+#endif
 }
 
 // The size the game draws at: the window's, unless the render device draws
@@ -174,6 +193,9 @@ std::unique_ptr<GameWindow> GameWindow::Create(GameWindowHost* windowHost, Rende
 	switch (type)
 	{
 	default:
+#ifdef __APPLE__
+	case RenderDeviceType::Metal: api = RenderAPI::Metal; break;
+#endif
 	case RenderDeviceType::Vulkan: api = RenderAPI::Vulkan; break;
 	case RenderDeviceType::D3D11: api = RenderAPI::D3D11; break;
 	case RenderDeviceType::OpenGL: api = RenderAPI::OpenGL; break;

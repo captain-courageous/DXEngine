@@ -238,6 +238,13 @@ public:
 	void UpdateAudio();
 
 	void OpenWindow();
+#ifdef __APPLE__
+	void InitializeMacIntegration();
+	void PollMacStatus();
+	bool classicAspectRatio = false;
+	float renderScale = 1.0f;
+	float interfaceScale = 1.0f;
+#endif
 	// Between the window and full screen, each at the ini's size for it:
 	// the console's togglefullscreen, and Enter with Alt held.
 	void ToggleFullscreen();

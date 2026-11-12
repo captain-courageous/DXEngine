@@ -3621,11 +3621,14 @@ void Engine::OpenWindow()
 	// The window backend that started, named in the log: DXE_DISPLAY_BACKEND
 	// asks for one, the first that starts is taken (ENGINE.md)
 	DisplayBackend* backend = DisplayBackend::Get();
-	std::string windowName = backend->IsSDL3() ? "SDL3" : backend->IsSDL2() ? "SDL2" : backend->IsWayland() ? "Wayland" : backend->IsX11() ? "X11" : backend->IsWin32() ? "Win32" : "unknown";
+	std::string windowName = backend->IsCocoa() ? "Cocoa" : backend->IsSDL3() ? "SDL3" : backend->IsSDL2() ? "SDL2" : backend->IsWayland() ? "Wayland" : backend->IsX11() ? "X11" : backend->IsWin32() ? "Win32" : "unknown";
 
 	std::string versionString = !LaunchInfo.gameVersionString.empty() ? " (v" + LaunchInfo.gameVersionString + ")" : "";
 
 	window->SetWindowTitle(LaunchInfo.gameName + versionString + " - DXEngine");
+#ifdef __APPLE__
+	InitializeMacIntegration();
+#endif
 	// The ini's sizes are pixels; the frame's are DIPs, which the window
 	// scales by the desktop's scale (a 1280x720 window on a desktop at 150%
 	// is 853x480 DIPs), as SETRES has it. Its size alone: the window where the
@@ -3669,6 +3672,9 @@ void Engine::CloseWindow()
 
 void Engine::TickWindow()
 {
+#ifdef __APPLE__
+	PollMacStatus();
+#endif
 	if (window)
 	{
 		if (viewport->bShowWindowsMouse() && viewport->bWindowsMouseAvailable())

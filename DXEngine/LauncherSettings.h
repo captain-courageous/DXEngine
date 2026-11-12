@@ -6,7 +6,8 @@ enum class RenderDeviceType
 	D3D11,
 	OpenGL,
 	GLES,
-	Software
+	Software,
+	Metal
 };
 
 enum class AntialiasMode
@@ -36,7 +37,11 @@ public:
 
 	struct
 	{
+#ifdef __APPLE__
+		RenderDeviceType Type = RenderDeviceType::Metal;
+#else
 		RenderDeviceType Type = RenderDeviceType::Vulkan;
+#endif
 		bool TypeNamed = false; // Settings.json names Type: else the game's ini chooses (Engine::ChooseRenderDevice)
 		bool CPUDriver = false; // the Vulkan or GL device on Mesa's CPU driver, lavapipe or llvmpipe
 		bool UseVSync = true;

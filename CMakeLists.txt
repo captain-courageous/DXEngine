@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(DXEngine)
+project(DXEngine LANGUAGES C CXX OBJCXX)
 
 # The warnings DXCommon, DXEngine, DXWidgets and DXGPU are built with: -Wall
 # on GCC and Clang, the third-party code in them too where it builds clean;
@@ -15,9 +15,9 @@ add_subdirectory(Thirdparty/openmpt)
 add_subdirectory(DXGPU)
 add_subdirectory(DXWidgets)
 
-if (WIN32)
-	# OpenAL Soft as OpenAL32.dll beside the engine (LGPL, so a library of its
-	# own): its library alone -- none of its programs or install rules, no
+if (WIN32 OR APPLE)
+	# OpenAL Soft as a library of its own:
+	set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
 	# PipeWire, nor the steps that run sed, dlltool or git while building.
 	set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
 	set(ALSOFT_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -42,7 +42,7 @@ if (MINGW)
 	target_compile_options(common PRIVATE -w)
 endif()
 
-project(DXEngine)
+project(DXEngine LANGUAGES C CXX OBJCXX)
 
 set(DXCOMMON_SOURCES
 	DXEngine/Precomp.cpp
@@ -884,7 +884,7 @@ source_group("Thirdparty" REGULAR_EXPRESSION "${CMAKE_CURRENT_SOURCE_DIR}/Thirdp
 source_group("Thirdparty\\miniz" REGULAR_EXPRESSION "${CMAKE_CURRENT_SOURCE_DIR}/Thirdparty/miniz/.+")
 source_group("Thirdparty\\kissfft" REGULAR_EXPRESSION "${CMAKE_CURRENT_SOURCE_DIR}/Thirdparty/kissfft/.+")
 
-include_directories(DXEngine DXWidgets/include Thirdparty DXGPU/include Thirdparty/openmpt Thirdparty/openal-soft/include Thirdparty/miniz)
+include_directories(DXEngine DXWidgets/include Thirdparty DXGPU/include Thirdparty/openmpt Thirdparty/openal-soft/include Thirdparty/miniz NativePort)
 
 if(WIN32)
 	set(DXCOMMON_SOURCES ${DXCOMMON_SOURCES} ${DXCOMMON_WIN32_SOURCES})
@@ -892,12 +892,26 @@ if(WIN32)
 	set(DXCOMMON_LIBS ${DXCOMMON_LIBS} ${DXCOMMON_WIN32_LIBS})
 	set(THIRDPARTY_SOURCES ${THIRDPARTY_SOURCES} ${THIRDPARTY_WIN32_SOURCES})
 	add_definitions(-DUNICODE -D_UNICODE -D_CRT_SECURE_NO_WARNINGS)
+elseif(APPLE)
+	set(DXCOMMON_SOURCES ${DXCOMMON_SOURCES} ${DXCOMMON_UNIX_SOURCES})
+	set(DXCOMMON_LIBS ${DXCOMMON_LIBS} ${CMAKE_DL_LIBS} OpenAL::OpenAL)
+	set(THIRDPARTY_SOURCES ${THIRDPARTY_SOURCES} ${THIRDPARTY_UNIX_SOURCES})
+	add_definitions(-DUNIX -D_UNIX)
+	add_link_options(-pthread)
 else()
 	set(DXCOMMON_SOURCES ${DXCOMMON_SOURCES})
 	set(DXCOMMON_LIBS ${DXCOMMON_LIBS} ${DXCOMMON_UNIX_LIBS} ${CMAKE_DL_LIBS})
 	set(THIRDPARTY_SOURCES ${THIRDPARTY_SOURCES} ${THIRDPARTY_UNIX_SOURCES})
 	add_definitions(-DUNIX -D_UNIX)
 	add_link_options(-pthread)
+endif()
+
+if(APPLE)
+    enable_language(OBJCXX)
+    set(DEUSEX_BUNDLE_BOOTSTRAP "${CMAKE_CURRENT_SOURCE_DIR}/NativePort/package_launcher.mm")
+    list(APPEND DXCOMMON_SOURCES DXEngine/RenderDevice/Metal/MetalRenderDevice.mm DXEngine/MacIntegration.mm "${DEUSEX_BUNDLE_BOOTSTRAP}")
+    set_source_files_properties(DXEngine/RenderDevice/Metal/MetalRenderDevice.mm DXEngine/MacIntegration.mm "${DEUSEX_BUNDLE_BOOTSTRAP}" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    list(APPEND DXCOMMON_LIBS "-framework Metal" "-framework QuartzCore" "-framework GameController")
 endif()
 
 if(MSVC)
@@ -920,10 +934,11 @@ endif()
 add_library(DXCommon STATIC ${DXCOMMON_SOURCES} ${THIRDPARTY_SOURCES})
 target_compile_options(DXCommon PRIVATE ${CXX_WARNING_FLAGS})
 set_target_properties(DXCommon PROPERTIES CXX_STANDARD 20)
+set_target_properties(DXCommon PROPERTIES OBJCXX_STANDARD 20)
 target_precompile_headers(DXCommon PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/DXEngine/Precomp.h>)
 include(cmake/version.cmake)
 
-add_executable(DXEngine WIN32 ${DXENGINE_SOURCES})
+add_executable(DXEngine WIN32 MACOSX_BUNDLE ${DXENGINE_SOURCES})
 if(MINGW)
 	# wWinMain, as MSVC takes it.
 	target_link_options(DXEngine PRIVATE -municode)
@@ -1016,6 +1031,9 @@ if (NOT ZIPDIR_EXECUTABLE)
 	add_executable(zipdir ${ZIPDIR_SOURCES})
 	set_target_properties(zipdir PROPERTIES CXX_STANDARD 20)
 	set_target_properties(zipdir PROPERTIES C_STANDARD 17)
+	if (APPLE)
+		target_link_libraries(zipdir PRIVATE "-framework CoreFoundation")
+	endif()
 endif()
 
 add_zip(DXEngine.pk3 ${CMAKE_CURRENT_SOURCE_DIR}/Resources)

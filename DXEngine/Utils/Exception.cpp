@@ -35,7 +35,7 @@ struct InitDbgHelp
 	bool bHasSymbols;
 };
 
-#elif defined __linux__
+#elif defined __linux__ || defined __APPLE__
 
 #include <execinfo.h>
 #include <cxxabi.h>
@@ -146,7 +146,7 @@ int Exception::CaptureStackFrames(std::ostringstream& sstream, int maxframes)
 
 
 /////////////////////////////////////////////////////////////////////
-#elif defined __linux__
+#elif defined __linux__ || defined __APPLE__
 
 	// The frames by backtrace, named where the dynamic symbols name them
 	// (the engine's own are not exported: those stay addresses, which
