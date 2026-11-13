@@ -212,6 +212,59 @@ struct MetalRenderChecks {
             renderer.Brightness=.5f;
             puts("PASS: live brightness/gamma, neutral identity, invalid setting handling, native HUD/bars/screenshots and correction after blending");
 
+            // Regression 1: VisibleBrush::Draw calls SetSceneNode(&brushframe) and then passes &frame->Frame
+            // into DrawComplexSurface; Metal must keep brushframe's ObjectToWorld transform and apply DepthBias.
+            frame=begin(16,12,false); renderer.SetSceneNode(&frame);
+            vec3 localTri[]={{-10,-10,0},{30,-10,0},{-10,30,0}};
+            SurfaceFacet localFacet{}; localFacet.Vertices=localTri; localFacet.VertexCount=3;
+            UnrealMipmap wallMip, moverMip; TextureInfo wallTex, moverTex;
+            solid(wallMip,wallTex,180,10005); solid(moverMip,moverTex,90,10006);
+            SurfaceInfo wallSurface; wallSurface.Texture=&wallTex; wallSurface.DepthBias=0;
+            SurfaceInfo moverSurface; moverSurface.Texture=&moverTex; moverSurface.DepthBias=1;
+            // Level wall coplanar at z=10 in world space (transform is identity ObjectToWorld):
+            renderer.DrawComplexSurface(&frame,wallSurface,facet);
+            SceneNode brushFrame=frame;
+            brushFrame.ObjectToWorld=mat4::translate(0,0,10);
+            renderer.SetSceneNode(&brushFrame);
+            // Local z=0 shifted by brushFrame.ObjectToWorld -> z=10, coplanar with `facet` above.
+            // Passing `&frame` matches VisibleBrush::DrawBrushPoly and must NOT reset ObjectToWorld.
+            renderer.DrawComplexSurface(&frame,moverSurface,localFacet);
+            renderer.SetSceneNode(&frame);
+            checkRGB(finish()[6*16+8],90,90,90);
+
+            // Regression 2: P8 textures with palette[0]=(255,0,255,255) drawn under PF_Translucent
+            // (Hermann's cell bulltprftrans_a via tex->PolyFlags() & PF_Masked, and picked-up chairs
+            // via PF_Translucent | PF_Masked) must zero palette[0] so zero pink leaks through.
+            auto* transient=engine->packages->GetTransientPackage();
+            auto* maskedUTex=UObject::Cast<UTexture>(transient->NewObject("video-masked-p8",engine->packages->FindClass("Engine.Texture"),ObjectFlags::Transient));
+            maskedUTex->bMasked()=true;
+            auto* plainUTex=UObject::Cast<UTexture>(transient->NewObject("video-plain-p8",engine->packages->FindClass("Engine.Texture"),ObjectFlags::Transient));
+            plainUTex->bMasked()=false;
+            TextureColor p8Palette[256]={};
+            p8Palette[0]={255,0,255,255};
+            p8Palette[1]={0,200,0,255};
+            UnrealMipmap p8Mip; p8Mip.Width=p8Mip.Height=1; p8Mip.Data={0};
+            TextureInfo maskedP8; maskedP8.CacheID=10007; maskedP8.Format=TextureFormat::P8; maskedP8.Mips=&p8Mip; maskedP8.NumMips=1; maskedP8.Palette=p8Palette; maskedP8.Texture=maskedUTex;
+            TextureInfo flagMaskedP8=maskedP8; flagMaskedP8.CacheID=10008; flagMaskedP8.Texture=plainUTex;
+            for (int c=0;c<2;++c) {
+                frame=begin(16,12,false); renderer.SetSceneNode(&frame);
+                renderer.DrawComplexSurface(&frame,wallSurface,facet); // gray (180,180,180) background
+                GouraudVertex quad[3];
+                for (int i=0;i<3;++i) quad[i]={points[i],vec3(1),{},{}};
+                if (c==0) renderer.DrawGouraudPolygon(&frame,maskedP8,quad,3,PF_Translucent);
+                else renderer.DrawGouraudPolygon(&frame,flagMaskedP8,quad,3,PF_Translucent|PF_Masked);
+                // Zero pink bleed from palette[0]: background (180,180,180) remains unchanged.
+                checkRGB(finish()[6*16+8],180,180,180);
+            }
+            // And palette index 1 (opaque non-zero color) still contributes cleanly.
+            p8Mip.Data={1}; renderer.UpdateTextureRect(maskedP8,0,0,1,1);
+            frame=begin(16,12,false); renderer.SetSceneNode(&frame);
+            renderer.DrawComplexSurface(&frame,wallSurface,facet);
+            GouraudVertex quad[3]; for (int i=0;i<3;++i) quad[i]={points[i],vec3(1),{},{}};
+            renderer.DrawGouraudPolygon(&frame,maskedP8,quad,3,PF_Translucent);
+            checkRGB(finish()[6*16+8],180,239,180);
+            puts("PASS: mover ObjectToWorld + DepthBias preserved under DrawComplexSurface, and translucent masked P8 has zero pink tint");
+
         }
     }
 };

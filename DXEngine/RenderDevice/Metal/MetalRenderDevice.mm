@@ -202,6 +202,7 @@ class MetalRenderDevice final : public RenderDevice {
         MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle;
         std::array<id<MTLTexture>,4> images;
         id<MTLSamplerState> sampler;
+        int depthBias=0;
     } batch;
     size_t drawCalls=0;
     bool worldPass=false,worldRendering=false;
@@ -218,6 +219,8 @@ class MetalRenderDevice final : public RenderDevice {
 
     id<MTLTexture> texture(TextureInfo* info,bool masked=false) {
         if (!info || !info->NumMips || !info->Mips) return white;
+        if (info->Texture && (info->Texture->PolyFlags()&PF_Masked)) masked=true;
+        if (info->Format!=TextureFormat::P8) masked=false;
         const int baseMip=TextureBaseMip(*info,*engine->client);
         const auto key=std::make_pair(info->CacheID,masked);
         auto found=textures.find(key);
@@ -276,20 +279,22 @@ class MetalRenderDevice final : public RenderDevice {
         [encoder setFragmentSamplerState:batch.sampler atIndex:0];
         [encoder setFragmentSamplerState:lightSampler atIndex:1];
         [encoder setRenderPipelineState:pipeline(batch.poly)];
+        [encoder setDepthBias:float(-batch.depthBias) slopeScale:float(-batch.depthBias) clamp:0.0f];
         [encoder drawPrimitives:batch.primitive vertexStart:0 vertexCount:batch.count];
         ++drawCalls; batch={};
     }
-    Vertex* reserveDraw(size_t count,TextureInfo* tex,TextureInfo* lm,uint32_t flags,MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle,TextureInfo* detail=nullptr,TextureInfo* macro=nullptr,bool fogMap=false,bool meshFog=false,bool smoothWorld=true) {
+    Vertex* reserveDraw(size_t count,TextureInfo* tex,TextureInfo* lm,uint32_t flags,MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle,TextureInfo* detail=nullptr,TextureInfo* macro=nullptr,bool fogMap=false,bool meshFog=false,bool smoothWorld=true,int depthBias=0) {
         if (!encoder || !count) return nullptr;
         if (count>device.maxBufferLength/sizeof(Vertex)) throw std::runtime_error("Metal: too many vertices");
+        const bool masked=(flags&PF_Masked)!=0;
         if (flags&PF_Translucent) flags&=~PF_Masked;
-        std::array<id<MTLTexture>,4> images={texture(tex,flags&PF_Masked),texture(lm),texture(detail),texture(macro)};
+        std::array<id<MTLTexture>,4> images={texture(tex,masked),texture(lm),texture(detail),texture(macro)};
         const uint32_t textureFlags=(lm ? 1u : 0u) | (detail ? (fogMap ? 8u : 2u) : 0u) | (macro ? 4u : 0u) | (meshFog ? 16u : 0u);
         id<MTLSamplerState> selected=(flags&PF_NoSmooth) ? nearest : smoothWorld ? sampler : linear;
         auto [buffer,offset]=verticesByFrame[frameIndex].reserve(device,count*sizeof(Vertex));
         // Only adjacent draws merge; never sort transparent geometry or cross a state boundary.
-        if (batch.count && (batch.poly!=flags || batch.textures!=textureFlags || batch.primitive!=primitive || batch.images!=images || batch.sampler!=selected || batch.buffer!=buffer || batch.offset+batch.count*sizeof(Vertex)!=offset)) flushDraws();
-        if (!batch.count) batch={buffer,offset,0,flags,textureFlags,primitive,images,selected};
+        if (batch.count && (batch.poly!=flags || batch.textures!=textureFlags || batch.primitive!=primitive || batch.images!=images || batch.sampler!=selected || batch.depthBias!=depthBias || batch.buffer!=buffer || batch.offset+batch.count*sizeof(Vertex)!=offset)) flushDraws();
+        if (!batch.count) batch={buffer,offset,0,flags,textureFlags,primitive,images,selected,depthBias};
         batch.count+=count;
         return reinterpret_cast<Vertex*>(static_cast<uint8_t*>(buffer.contents)+offset);
     }
@@ -316,9 +321,10 @@ class MetalRenderDevice final : public RenderDevice {
         [output drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [output endEncoding];
     }
-    vec4 screen(float x,float y,float z) const {
-        if (!current) throw std::runtime_error("Metal: no scene node");
-        return {2*x/current->FX-1,1-2*y/current->FY,std::clamp(z/32768.0f,0.0f,1.0f),1};
+    vec4 screen(const SceneNode* frame,float x,float y,float z) const {
+        const SceneNode* node=frame ? frame : current;
+        if (!node) throw std::runtime_error("Metal: no scene node");
+        return {2*x/node->FX-1,1-2*y/node->FY,std::clamp(z/32768.0f,0.0f,1.0f),1};
     }
     explicit MetalRenderDevice(CAMetalLayer* nativeLayer) {
         layer=nativeLayer;
@@ -475,10 +481,12 @@ public:
     }
     void DrawComplexSurface(SceneNode* frame,SurfaceInfo& surface,SurfaceFacet& facet) override {
         if (facet.VertexCount<3) return;
-        if (current!=frame) SetSceneNode(frame);
+        // VisibleBrush::Draw applies ObjectToWorld via SetSceneNode(&brushframe)
+        // and then passes &frame->Frame here; only initialize if no node is bound.
+        if (!current) SetSceneNode(frame);
         const bool fog=surface.FogMap && surface.FogMap->NumMips>0 && surface.FogMap->Mips && !surface.FogMap->Mips[0].Data.empty();
         TextureInfo* extra=fog ? surface.FogMap : !surface.FogMap && engine->renderdev->DetailTextures ? surface.DetailTexture : nullptr;
-        Vertex* out=reserveDraw(size_t(facet.VertexCount-2)*3,surface.Texture,surface.LightMap,surface.PolyFlags,MTLPrimitiveTypeTriangle,extra,surface.MacroTexture,fog);
+        Vertex* out=reserveDraw(size_t(facet.VertexCount-2)*3,surface.Texture,surface.LightMap,surface.PolyFlags,MTLPrimitiveTypeTriangle,extra,surface.MacroTexture,fog,false,true,surface.DepthBias);
         if (!out) return;
         auto vertex=[&](uint32_t i) {
             auto p=facet.Vertices[i]; auto relative=p-facet.MapCoords.Origin;
@@ -496,7 +504,7 @@ public:
         }
     }
     void DrawGouraudPolygon(SceneNode* frame,TextureInfo& info,const GouraudVertex* p,int count,uint32_t flags) override {
-        if (count<3) return; if (current!=frame) SetSceneNode(frame);
+        if (count<3) return; if (!current) SetSceneNode(frame);
         const bool fog=(flags&(PF_RenderFog|PF_Translucent|PF_Modulated))==PF_RenderFog;
         Vertex* out=reserveDraw(size_t(count-2)*3,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,fog);
         if (!out) return;
@@ -507,7 +515,7 @@ public:
         }
     }
     void DrawGouraudTriangles(SceneNode* frame,TextureInfo& info,const GouraudVertex* p,int numTris,uint32_t flags) override {
-        if (numTris<=0) return; if (current!=frame) SetSceneNode(frame);
+        if (numTris<=0) return; if (!current) SetSceneNode(frame);
         const bool fog=(flags&(PF_RenderFog|PF_Translucent|PF_Modulated))==PF_RenderFog;
         size_t count=size_t(numTris)*3;
         Vertex* out=reserveDraw(count,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,fog);
@@ -520,27 +528,27 @@ public:
     }
     void DrawTile(SceneNode* frame,TextureInfo& info,float x,float y,float w,float h,float u,float v,float ul,float vl,float z,vec4 color,vec4,uint32_t flags) override {
         flags=TileFlags(info,flags);
-        if (current!=frame) SetSceneNode(frame);
+        if (!current) SetSceneNode(frame);
         if (flags&PF_Modulated) color=vec4(1);
         u*=GetUMult(info);ul*=GetUMult(info);v*=GetVMult(info);vl*=GetVMult(info);
         Vertex* out=reserveDraw(6,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,false,worldRendering);
         if (!out) return;
-        out[0]={screen(x,y,z),color,{u,v},{}};
-        out[1]={screen(x+w,y,z),color,{u+ul,v},{}};
-        out[2]={screen(x+w,y+h,z),color,{u+ul,v+vl},{}};
+        out[0]={screen(frame,x,y,z),color,{u,v},{}};
+        out[1]={screen(frame,x+w,y,z),color,{u+ul,v},{}};
+        out[2]={screen(frame,x+w,y+h,z),color,{u+ul,v+vl},{}};
         out[3]=out[0]; out[4]=out[2];
-        out[5]={screen(x,y+h,z),color,{u,v+vl},{}};
+        out[5]={screen(frame,x,y+h,z),color,{u,v+vl},{}};
     }
     void Draw3DLine(SceneNode* frame,vec4 color,uint32_t,vec3 a,vec3 b) override {
-        if(current!=frame) SetSceneNode(frame);
+        if(!current) SetSceneNode(frame);
         if (auto* out=reserveDraw(2,nullptr,nullptr,PF_Highlighted,MTLPrimitiveTypeLine)) {
             out[0]={transform*vec4(a,1),color,{},{}}; out[1]={transform*vec4(b,1),color,{},{}};
         }
     }
     void Draw2DLine(SceneNode* frame,vec4 color,uint32_t,vec3 a,vec3 b) override {
-        if(current!=frame) SetSceneNode(frame);
+        if(!current) SetSceneNode(frame);
         if (auto* out=reserveDraw(2,nullptr,nullptr,PF_Highlighted,MTLPrimitiveTypeLine)) {
-            out[0]={screen(a.x,a.y,a.z),color,{},{}}; out[1]={screen(b.x,b.y,b.z),color,{},{}};
+            out[0]={screen(frame,a.x,a.y,a.z),color,{},{}}; out[1]={screen(frame,b.x,b.y,b.z),color,{},{}};
         }
     }
     void ClearZ() override { if(encoder) { flushDraws(); [encoder endEncoding];beginPass(false,true); } }
