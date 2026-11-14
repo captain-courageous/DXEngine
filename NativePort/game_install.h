@@ -9,6 +9,8 @@ namespace fs = std::filesystem;
 
 inline fs::path DefaultDeusExInstall(const fs::path& app, const fs::path& remembered)
 {
+    const auto bundled = app/"Contents/Resources/GameData";
+    if (fs::is_directory(bundled)) return bundled;
     const auto adjacent = app.parent_path()/"Put game files here";
     return fs::is_directory(adjacent) ? adjacent : remembered;
 }

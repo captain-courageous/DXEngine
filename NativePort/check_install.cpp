@@ -14,6 +14,9 @@ int main(int argc, char** argv)
     const auto portable = temp/"Portable package";
     fs::create_directories(portable/"Put game files here");
     assert(DefaultDeusExInstall(portable/"Deus Ex.app", assets) == portable/"Put game files here");
+    const auto bundled = temp/"Bundled.app";
+    fs::create_directories(bundled/"Contents/Resources/GameData");
+    assert(DefaultDeusExInstall(bundled, assets) == bundled/"Contents/Resources/GameData");
     assert(DefaultDeusExInstall(temp/"No adjacent folder/Deus Ex.app", assets) == assets);
     for (const char* folder : {"System", "Maps", "Music", "Sounds", "Textures"})
         fs::create_directory_symlink(assets/folder, portable/"Put game files here"/folder);

@@ -8,9 +8,10 @@ import tempfile
 import tarfile
 import zipfile
 import hashlib
+import os
 
 root = pathlib.Path(__file__).resolve().parent.parent
-build = root / 'build'
+build = pathlib.Path(os.environ.get('DXENGINE_BUILD_DIR', str(root / 'build'))).resolve()
 dist = root / 'dist'
 dist.mkdir(exist_ok=True)
 staging = tempfile.TemporaryDirectory(prefix='deusex-package-', dir=dist)
@@ -37,6 +38,9 @@ def run(*args):
 engine = macos / 'DXEngine'
 shutil.copy2(build / 'DXEngine.app/Contents/MacOS/DXEngine', engine)
 shutil.copy2(build / 'DXEngine.pk3', resources)
+icon_src = root / 'NativePort/DeusEx.icns'
+if icon_src.is_file():
+    shutil.copy2(icon_src, resources / 'DeusEx.icns')
 for source in (build / 'Thirdparty/openal-soft/libopenal.1.dylib',):
     target = frameworks / source.name
     if target.exists():
@@ -47,7 +51,10 @@ run('install_name_tool', '-add_rpath', '@executable_path/../Frameworks', engine)
 
 info = dict(CFBundleExecutable='DXEngine', CFBundleIdentifier='local.deusex.native',
             CFBundleName='Deus Ex', CFBundleDisplayName='Deus Ex', CFBundlePackageType='APPL',
-            CFBundleShortVersionString='0.2.0', CFBundleVersion='10', LSMinimumSystemVersion='27.0',
+            CFBundleIconFile='DeusEx',
+            CFBundleShortVersionString=os.environ.get('DEUSEX_VERSION', '0.1.0'),
+            CFBundleVersion=os.environ.get('DEUSEX_BUILD_NUMBER', '1'),
+            LSMinimumSystemVersion=os.environ.get('DEUSEX_MACOS_MIN', '14.0'),
             NSHighResolutionCapable=True, NSSupportsAutomaticGraphicsSwitching=True,
             LSApplicationCategoryType='public.app-category.role-playing-games',
             LSSupportsGameMode=True, GCSupportsGameMode=True, GCSupportsControllerUserInteraction=True)
@@ -97,9 +104,35 @@ with tarfile.open(source_archive, 'w:gz') as tar:
         if source.is_file():
             assert source.suffix.lower() not in {'.exe', '.dll', '.u', '.dx', '.utx', '.uax', '.umx', '.o', '.a', '.dylib'}, source
             tar.add(source, arcname=str(pathlib.Path('Deus-Ex-Mac/.porting/SurrealEngine') / name), recursive=False)
-    for name in ('package_launcher.mm', 'game_install.h', 'package_app.py', 'check_install.cpp', 'check_install.py', 'check_input.py', 'check_input.cpp', 'check_video.mm', 'INSTALL.md'):
-        tar.add(root / 'NativePort' / name, arcname='Deus-Ex-Mac/NativePort/' + name)
+    for name in ('package_launcher.mm', 'game_install.h', 'package_app.py', 'check_install.cpp', 'check_install.py', 'check_input.py', 'check_input.cpp', 'check_video.mm', 'INSTALL.md', 'DeusEx.icns', 'quick-install.sh', 'RELEASE_README.md'):
+        src = root / 'NativePort' / name
+        if src.exists():
+            tar.add(src, arcname='Deus-Ex-Mac/NativePort/' + name)
 shutil.copy2(root / 'NativePort/INSTALL.md', dist / 'INSTALL.md')
+
+# Also assemble a release directory containing the engine-only app tarball,
+# zip, checksums, license notices, one-line quick-install.sh, and README ready to host on GitHub.
+mac_release = dist / 'macDeusEx-release'
+mac_release.mkdir(exist_ok=True)
+mac_tar = mac_release / 'DeusEx-macos-arm64.tar.gz'
+mac_zip = mac_release / 'DeusEx-macos-arm64.zip'
+mac_source = mac_release / source_archive.name
+run('tar', '-C', app.parent, '--no-mac-metadata', '-czf', mac_tar, app.name)
+run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', app, mac_zip)
+shutil.copy2(source_archive, mac_source)
+(mac_release / 'version.sha').write_text(hashlib.sha256(engine.read_bytes()).hexdigest() + '\n')
+for src_name, dst_name in (('NativePort/quick-install.sh', 'quick-install.sh'), ('NativePort/RELEASE_README.md', 'README.md'), ('LICENSE.md', 'LICENSE.md')):
+    src = root / src_name
+    if src.exists():
+        dst = mac_release / dst_name
+        shutil.copy2(src, dst)
+        if dst_name.endswith('.sh'):
+            dst.chmod(0o755)
+(mac_release / 'SHA256SUMS.txt').write_text(''.join(
+    hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n'
+    for p in (mac_tar, mac_zip, mac_source, mac_release / 'version.sha')
+))
+
 (dist / 'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n' for p in (archive, source_archive)))
 installed_release = dist / 'Deus Ex Mac'
 installed_release.mkdir(exist_ok=True)
@@ -112,3 +145,4 @@ shutil.move(app, installed_app)
 staging.cleanup()
 print(archive)
 print(source_archive)
+print(mac_release)
