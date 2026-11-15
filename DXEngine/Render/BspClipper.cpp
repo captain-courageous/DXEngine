@@ -28,8 +28,12 @@ BspClipper::~BspClipper()
 
 void BspClipper::SetViewportSize(int width, int height)
 {
-	ViewportWidth = std::clamp(width, 1, (int)MaxWidth);
-	ViewportHeight = std::clamp(height, 1, (int)MaxHeight);
+	int clampedW = std::clamp(width, 1, (int)MaxWidth);
+	int clampedH = std::clamp(height, 1, (int)MaxHeight);
+	int scale = std::max(1, (clampedH + TargetOcclusionHeight - 1) / TargetOcclusionHeight);
+	OcclusionCoarse = scale > 1;
+	ViewportWidth = std::max(1, (clampedW + scale - 1) / scale);
+	ViewportHeight = std::max(1, (clampedH + scale - 1) / scale);
 	if ((int)Rows.size() != ViewportHeight)
 	{
 		Rows.resize(ViewportHeight);
@@ -167,7 +171,8 @@ bool BspClipper::DrawPolygon(const vec3* vertices, uint32_t count, bool solid)
 	ClipVertex bufferB[MaxPolygonVertices + 6];
 	ClipVertex* in = bufferA;
 	int n = (int)count;
-	bool needsClipping = false;
+	uint8_t anyOutside = 0;
+	uint8_t allOutside = 0x3f;
 	for (int i = 0; i < n; i++)
 	{
 		ClipVertex& v = in[i];
@@ -178,15 +183,26 @@ bool BspClipper::DrawPolygon(const vec3* vertices, uint32_t count, bool solid)
 		v.d[3] = v.pos.w - v.pos.y;
 		v.d[4] = v.pos.z + v.pos.w;
 		v.d[5] = dot(PortalPlane, vec4(vertices[i], 1.0f));
-		// Any distance not at least zero (a NaN too) means clipping
+		// Any distance not at least zero (a NaN too) means clipping; if all vertices fail one plane, cull immediately.
+		uint8_t out = 0;
 		for (int k = 0; k < 6; k++)
-			needsClipping = needsClipping || !(v.d[k] >= 0.0f);
+		{
+			if (!(v.d[k] >= 0.0f))
+				out |= uint8_t(1u << k);
+		}
+		anyOutside |= out;
+		allOutside &= out;
 	}
 
-	if (needsClipping)
+	if (allOutside != 0)
+		return false;
+
+	if (anyOutside != 0)
 	{
 		for (int p = 0; p < 6; p++)
 		{
+			if ((anyOutside & uint8_t(1u << p)) == 0)
+				continue;
 			ClipVertex* out = in == bufferA ? bufferB : bufferA;
 			int m = 0;
 			for (int i = 0; i < n; i++)
@@ -342,7 +358,52 @@ bool BspClipper::IsAABBVisible(const BBox& bbox)
 
 	// Perform visibility check of the bounding box itself using the spans:
 
-	// Vertices of the AABB
+	// Transform the 8 AABB corners by combining scaled matrix columns instead of 8 full mat4*vec4 calls.
+	float viewport_width = (float)ViewportWidth;
+	float viewport_height = (float)ViewportHeight;
+	vec2 min2d(1e30f, 1e30f);
+	vec2 max2d(-1e30f, -1e30f);
+
+#ifdef MAT_USE_NEON
+	float32x4_t c0 = vld1q_f32(WorldToProjection.matrix);
+	float32x4_t c1 = vld1q_f32(WorldToProjection.matrix + 4);
+	float32x4_t c2 = vld1q_f32(WorldToProjection.matrix + 8);
+	float32x4_t c3 = vld1q_f32(WorldToProjection.matrix + 12);
+
+	float32x4_t x0v = vmulq_n_f32(c0, bbox.min.x);
+	float32x4_t x1v = vmulq_n_f32(c0, bbox.max.x);
+	float32x4_t y0v = vmulq_n_f32(c1, bbox.min.y);
+	float32x4_t y1v = vmulq_n_f32(c1, bbox.max.y);
+	float32x4_t z0v = vfmaq_n_f32(c3, c2, bbox.min.z);
+	float32x4_t z1v = vfmaq_n_f32(c3, c2, bbox.max.z);
+
+	float32x4_t z0y0 = vaddq_f32(z0v, y0v);
+	float32x4_t z0y1 = vaddq_f32(z0v, y1v);
+	float32x4_t z1y0 = vaddq_f32(z1v, y0v);
+	float32x4_t z1y1 = vaddq_f32(z1v, y1v);
+
+	float32x4_t corners[8] = {
+		vaddq_f32(x0v, z0y0), vaddq_f32(x1v, z0y0),
+		vaddq_f32(x0v, z0y1), vaddq_f32(x1v, z0y1),
+		vaddq_f32(x0v, z1y0), vaddq_f32(x1v, z1y0),
+		vaddq_f32(x0v, z1y1), vaddq_f32(x1v, z1y1)
+	};
+
+	float halfW = viewport_width * 0.5f;
+	float halfH = viewport_height * 0.5f;
+	for (int j = 0; j < 8; j++)
+	{
+		float x = vgetq_lane_f32(corners[j], 0);
+		float y = vgetq_lane_f32(corners[j], 1);
+		float invw = 1.0f / vgetq_lane_f32(corners[j], 3);
+		float sx = halfW * (1.0f + x * invw);
+		float sy = halfH * (1.0f - y * invw);
+		min2d.x = std::min(min2d.x, sx);
+		min2d.y = std::min(min2d.y, sy);
+		max2d.x = std::max(max2d.x, sx);
+		max2d.y = std::max(max2d.y, sy);
+	}
+#else
 	vec4 verts[8] =
 	{
 		WorldToProjection * vec4(bbox.min.x, bbox.min.y, bbox.min.z, 1.0f),
@@ -355,38 +416,18 @@ bool BspClipper::IsAABBVisible(const BBox& bbox)
 		WorldToProjection * vec4(bbox.max.x, bbox.max.y, bbox.max.z, 1.0f)
 	};
 
-	float viewport_x = 0.0f;
-	float viewport_y = 0.0f;
-	float viewport_width = (float)ViewportWidth;
-	float viewport_height = (float)ViewportHeight;
-
-	// Map to 2D viewport:
 	for (int j = 0; j < 8; j++)
 	{
 		auto& v = verts[j];
-
-		// Calculate normalized device coordinates:
 		v.w = 1.0f / v.w;
-		v.x *= v.w;
-		v.y *= v.w;
-		v.z *= v.w;
-
-		// Apply viewport scale to get screen coordinates:
-		v.x = viewport_x + viewport_width * (1.0f + v.x) * 0.5f;
-		v.y = viewport_y + viewport_height * (1.0f - v.y) * 0.5f;
+		v.x = viewport_width * (1.0f + v.x * v.w) * 0.5f;
+		v.y = viewport_height * (1.0f - v.y * v.w) * 0.5f;
+		min2d.x = std::min(min2d.x, v.x);
+		min2d.y = std::min(min2d.y, v.y);
+		max2d.x = std::max(max2d.x, v.x);
+		max2d.y = std::max(max2d.y, v.y);
 	}
-
-	// Find the 2D bounding box
-
-	vec2 min2d = verts[0].xy();
-	vec2 max2d = verts[0].xy();
-	for (int j = 1; j < 8; j++)
-	{
-		min2d.x = std::min(min2d.x, verts[j].x);
-		min2d.y = std::min(min2d.y, verts[j].y);
-		max2d.x = std::max(max2d.x, verts[j].x);
-		max2d.y = std::max(max2d.y, verts[j].y);
-	}
+#endif
 
 	// if we are intersecting with any of the sides then include the entire edge
 	if (bits & (1 << 2)) min2d.x = 0;
@@ -399,14 +440,33 @@ bool BspClipper::IsAABBVisible(const BBox& bbox)
 	// box's rectangle (dx-reverse-info render-dll.md, which actors are
 	// drawn), whatever a polygon's sample point.
 
-	int topY = PixelFloor(min2d.y, ViewportHeight);
-	int bottomY = PixelFloor(max2d.y, ViewportHeight);
-	if (topY >= bottomY)
-		return false;
-	int x0 = PixelFloor(min2d.x, ViewportWidth);
-	int x1 = PixelFloor(max2d.x, ViewportWidth);
-	if (x0 >= x1)
-		return false;
+	int topY, bottomY, x0, x1;
+	if (OcclusionCoarse)
+	{
+		// When the clipper grid is coarser than screen pixels, outset to every touched coarse cell
+		// before empty-rect early-outs so sub-cell visible bounds are never falsely culled.
+		if (max2d.y <= 0.0f || min2d.y >= viewport_height || max2d.x <= 0.0f || min2d.x >= viewport_width)
+			return false;
+		topY = PixelFloor(min2d.y, ViewportHeight);
+		bottomY = PixelFloor(std::max(max2d.y, min2d.y + 1e-4f) + 1.0f, ViewportHeight);
+		if (topY >= bottomY)
+			return false;
+		x0 = PixelFloor(min2d.x, ViewportWidth);
+		x1 = PixelFloor(std::max(max2d.x, min2d.x + 1e-4f) + 1.0f, ViewportWidth);
+		if (x0 >= x1)
+			return false;
+	}
+	else
+	{
+		topY = PixelFloor(min2d.y, ViewportHeight);
+		bottomY = PixelFloor(max2d.y, ViewportHeight);
+		if (topY >= bottomY)
+			return false;
+		x0 = PixelFloor(min2d.x, ViewportWidth);
+		x1 = PixelFloor(max2d.x, ViewportWidth);
+		if (x0 >= x1)
+			return false;
+	}
 	for (int y = topY; y < bottomY; y++)
 	{
 		if (IsVisible(y, x0, x1))

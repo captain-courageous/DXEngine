@@ -304,6 +304,7 @@ public:
 	void OnWindowClose() override;
 	void OnWindowActivated() override;
 	void OnWindowDeactivated() override;
+	bool windowFocused = true;
 	void OnWindowDpiScaleChanged() override;
 	void OnWindowMaximize() override;
 

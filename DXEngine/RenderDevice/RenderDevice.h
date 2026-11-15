@@ -186,6 +186,8 @@ public:
 	// The last frame's pixels, as many as LastFrameSize gives: the scene the
 	// device drew, which a window resized since no longer matches.
 	virtual void ReadPixels(TextureColor* Pixels) = 0;
+	virtual bool NeedsReadableFrameForReadPixels() const { return false; }
+	virtual void SetCaptureReadableFrame(bool enable) {}
 	virtual void LastFrameSize(int& width, int& height) const { width = GetRenderWidth(); height = GetRenderHeight(); }
 	// A row of a ten-bit scene buffer, red in each pixel's low bits, made
 	// bytes for ReadPixels (RenderDevice.cpp); y is the row's place in the

@@ -15,6 +15,7 @@ public:
 	AudioSource() = default;
 	virtual ~AudioSource() = default;
 	virtual int GetFrequency() = 0;
+	virtual void SetOutputFrequency(int freq) {}
 	virtual int GetChannels() = 0;
 	virtual int GetSamples() = 0;
 	virtual void SeekToSample(uint64_t position) = 0;

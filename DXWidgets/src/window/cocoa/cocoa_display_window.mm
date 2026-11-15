@@ -253,6 +253,10 @@ public:
     std::map<InputKey, bool> keyState;
     bool cursorLocked = false;
     bool resizable = true;
+    bool wantsFullscreen = false;
+    bool fullscreenTransition = false;
+    bool fullscreenScheduled = false;
+    bool programmaticExitFullscreen = false;
     NSSize minContentSize = NSMakeSize(0.0, 0.0);
     NSSize maxContentSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
     RenderAPI renderAPI = RenderAPI::Unspecified;
@@ -282,6 +286,8 @@ public:
     CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink, const CVTimeStamp* inNow, const CVTimeStamp* inOutputTime, CVOptionFlags flagsIn, CVOptionFlags* flagsOut, void* displayLinkContext);
     void startDisplayLink();
     void stopDisplayLink();
+    void activateApp();
+    void syncFullscreenState();
 
     ~CocoaDisplayWindowImpl()
     {
@@ -314,6 +320,76 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
     CVDisplayLinkStop(displayLink);
     CVDisplayLinkRelease(displayLink);
     displayLink = nullptr;
+}
+
+void CocoaDisplayWindowImpl::activateApp()
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (@available(macOS 14.0, *))
+    {
+        [NSApp activate];
+    }
+    else
+    {
+        [NSApp activateIgnoringOtherApps:YES];
+    }
+    [[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps];
+#pragma clang diagnostic pop
+}
+
+void CocoaDisplayWindowImpl::syncFullscreenState()
+{
+    if (!window || fullscreenTransition)
+        return;
+
+    const bool isFullscreen = ([window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen;
+    if (wantsFullscreen == isFullscreen)
+    {
+        fullscreenScheduled = false;
+        return;
+    }
+
+    if (wantsFullscreen)
+    {
+        if (([window styleMask] & NSWindowStyleMaskTitled) != 0 && resizable)
+            [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+
+        if ([NSApp isActive] && [window isVisible])
+        {
+            fullscreenScheduled = false;
+            fullscreenTransition = true;
+            [window toggleFullScreen:nil];
+            return;
+        }
+
+        // Defer toggleFullScreen until AppKit finishes initial order-front and activation.
+        if (!fullscreenScheduled)
+        {
+            fullscreenScheduled = true;
+            std::shared_ptr<CocoaDisplayWindowLifetime> life = lifetime;
+            CocoaDisplayWindowImpl* self = this;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!life->alive)
+                    return;
+                self->fullscreenScheduled = false;
+                if (!self->window || !self->wantsFullscreen || self->fullscreenTransition)
+                    return;
+                if (([self->window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen)
+                    return;
+                self->activateApp();
+                [self->window makeKeyAndOrderFront:nil];
+                self->fullscreenTransition = true;
+                [self->window toggleFullScreen:nil];
+            });
+        }
+    }
+    else
+    {
+        programmaticExitFullscreen = true;
+        fullscreenTransition = true;
+        [window toggleFullScreen:nil];
+    }
 }
 
 @interface ZWidgetView : NSView
@@ -732,6 +808,8 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
 - (void)windowDidBecomeKey:(NSNotification *)notification
 {
     if (impl->windowHost && impl->window.isKeyWindow && NSApp.active) impl->windowHost->OnWindowActivated();
+    if (impl->wantsFullscreen && !impl->fullscreenTransition && ([impl->window styleMask] & NSWindowStyleMaskFullScreen) == 0 && NSApp.active && impl->window.isVisible)
+        impl->syncFullscreenState();
 }
 
 - (void)windowDidResize:(NSNotification *)notification
@@ -750,8 +828,11 @@ void CocoaDisplayWindowImpl::stopDisplayLink()
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification { [self windowDidChangeScreen:notification]; }
-- (void)windowDidEnterFullScreen:(NSNotification *)notification { fprintf(stderr, "macOS native fullscreen: entered\n"); [self windowDidChangeScreen:notification]; }
-- (void)windowDidExitFullScreen:(NSNotification *)notification { fprintf(stderr, "macOS native fullscreen: exited\n"); [self windowDidChangeScreen:notification]; }
+- (void)windowWillEnterFullScreen:(NSNotification *)notification { impl->fullscreenTransition = true; }
+- (void)windowDidEnterFullScreen:(NSNotification *)notification { impl->fullscreenTransition = false; impl->fullscreenScheduled = false; fprintf(stderr, "macOS native fullscreen: entered\n"); [self windowDidChangeScreen:notification]; impl->syncFullscreenState(); }
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window { impl->fullscreenTransition = false; fprintf(stderr, "macOS native fullscreen: failed to enter\n"); }
+- (void)windowWillExitFullScreen:(NSNotification *)notification { impl->fullscreenTransition = true; if (!impl->programmaticExitFullscreen) impl->wantsFullscreen = false; impl->programmaticExitFullscreen = false; }
+- (void)windowDidExitFullScreen:(NSNotification *)notification { impl->fullscreenTransition = false; impl->programmaticExitFullscreen = false; fprintf(stderr, "macOS native fullscreen: exited\n"); [self windowDidChangeScreen:notification]; impl->syncFullscreenState(); }
 - (void)windowDidMiniaturize:(NSNotification *)notification { [self windowDidResignKey:notification]; }
 - (void)windowDidDeminiaturize:(NSNotification *)notification { [self windowDidBecomeKey:notification]; }
 
@@ -834,6 +915,7 @@ CocoaDisplayWindow::CocoaDisplayWindow(DisplayWindowHost* windowHost, WidgetType
     [impl->window setAcceptsMouseMovedEvents:YES];
     [impl->window setRestorable:NO];
     [impl->window setReleasedWhenClosed:NO];
+    [impl->window setOpaque:YES];
 
     ZWidgetView* view = [[ZWidgetView alloc] initWithImpl:impl.get()];
     [impl->window setContentView:view];
@@ -861,7 +943,8 @@ CocoaDisplayWindow::CocoaDisplayWindow(DisplayWindowHost* windowHost, WidgetType
             {
                 impl->metalLayer.device = impl->metalDevice;
                 impl->metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-                impl->metalLayer.framebufferOnly = NO;  // Allow reading for screenshots, etc.
+                impl->metalLayer.framebufferOnly = YES;
+                impl->metalLayer.opaque = YES;
                 impl->metalLayer.presentsWithTransaction = NO;
                 impl->metalLayer.displaySyncEnabled = YES;
                 impl->metalLayer.maximumDrawableCount = 3;
@@ -1007,7 +1090,7 @@ void CocoaDisplayWindow::Show()
     if (impl->window)
     {
         // CRITICAL: Activate the application so it can receive keyboard events
-        [NSApp activateIgnoringOtherApps:YES];
+        impl->activateApp();
         [impl->window makeKeyAndOrderFront:nil];
 
         // Trigger initial layout
@@ -1026,7 +1109,8 @@ void CocoaDisplayWindow::ShowFullscreen()
 {
     if (impl->window)
     {
-        [impl->window toggleFullScreen:nil];
+        impl->wantsFullscreen = true;
+        impl->syncFullscreenState();
     }
 }
 
@@ -1050,14 +1134,16 @@ void CocoaDisplayWindow::ShowNormal()
 {
     if (impl->window)
     {
+        impl->wantsFullscreen = false;
         if ([impl->window isMiniaturized])
         {
             [impl->window deminiaturize:nil];
         }
-        if ([impl->window isZoomed])
+        if ([impl->window isZoomed] && (([impl->window styleMask] & NSWindowStyleMaskFullScreen) == 0))
         {
             [impl->window zoom:nil];
         }
+        impl->syncFullscreenState();
     }
 }
 
@@ -1121,9 +1207,30 @@ bool CocoaDisplayWindow::IsWindowFullscreen()
 {
     if (impl->window)
     {
-        return ([impl->window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen;
+        return impl->wantsFullscreen || (([impl->window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen);
     }
     return false;
+}
+
+bool CocoaDisplayWindow::IsWindowMinimized() const
+{
+    return impl->window ? [impl->window isMiniaturized] == YES : false;
+}
+
+bool CocoaDisplayWindow::IsWindowFocused() const
+{
+    if (!impl->window)
+        return false;
+    return [NSApp isActive] && ([impl->window isKeyWindow] || [impl->window isMainWindow]) && ![impl->window isMiniaturized];
+}
+
+bool CocoaDisplayWindow::IsWindowOccluded() const
+{
+    if (!impl->window)
+        return true;
+    if ([impl->window isMiniaturized])
+        return true;
+    return (impl->window.occlusionState & NSWindowOcclusionStateVisible) == 0;
 }
 
 void CocoaDisplayWindow::Hide()

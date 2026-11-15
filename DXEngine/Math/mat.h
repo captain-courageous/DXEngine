@@ -6,6 +6,9 @@
 #if (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))) || ((defined(__i386__) || defined(__x86_64__) || defined(__e2k__)) && defined(__SSE2__))
 #define MAT_USE_SSE2
 #include <emmintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define MAT_USE_NEON
+#include <arm_neon.h>
 #endif
 
 enum class handedness
@@ -55,14 +58,7 @@ struct mat4
 // of thousands of times a frame. The same sums in the same order either way.
 inline vec4 mat4::operator*(const vec4 &v) const
 {
-#ifndef MAT_USE_SSE2
-	vec4 result;
-	result.x = matrix[0 * 4 + 0] * v.x + matrix[1 * 4 + 0] * v.y + matrix[2 * 4 + 0] * v.z + matrix[3 * 4 + 0] * v.w;
-	result.y = matrix[0 * 4 + 1] * v.x + matrix[1 * 4 + 1] * v.y + matrix[2 * 4 + 1] * v.z + matrix[3 * 4 + 1] * v.w;
-	result.z = matrix[0 * 4 + 2] * v.x + matrix[1 * 4 + 2] * v.y + matrix[2 * 4 + 2] * v.z + matrix[3 * 4 + 2] * v.w;
-	result.w = matrix[0 * 4 + 3] * v.x + matrix[1 * 4 + 3] * v.y + matrix[2 * 4 + 3] * v.z + matrix[3 * 4 + 3] * v.w;
-	return result;
-#else
+#if defined(MAT_USE_SSE2)
 	__m128 m0 = _mm_loadu_ps(matrix);
 	__m128 m1 = _mm_loadu_ps(matrix + 4);
 	__m128 m2 = _mm_loadu_ps(matrix + 8);
@@ -75,6 +71,26 @@ inline vec4 mat4::operator*(const vec4 &v) const
 	mv = _mm_add_ps(_mm_add_ps(_mm_add_ps(m0, m1), m2), m3);
 	vec4 result;
 	_mm_storeu_ps(&result.x, mv);
+	return result;
+#elif defined(MAT_USE_NEON)
+	float32x4_t m0 = vld1q_f32(matrix);
+	float32x4_t m1 = vld1q_f32(matrix + 4);
+	float32x4_t m2 = vld1q_f32(matrix + 8);
+	float32x4_t m3 = vld1q_f32(matrix + 12);
+	float32x4_t mv = vld1q_f32(&v.x);
+	float32x4_t res = vmulq_laneq_f32(m0, mv, 0);
+	res = vfmaq_laneq_f32(res, m1, mv, 1);
+	res = vfmaq_laneq_f32(res, m2, mv, 2);
+	res = vfmaq_laneq_f32(res, m3, mv, 3);
+	vec4 result;
+	vst1q_f32(&result.x, res);
+	return result;
+#else
+	vec4 result;
+	result.x = matrix[0 * 4 + 0] * v.x + matrix[1 * 4 + 0] * v.y + matrix[2 * 4 + 0] * v.z + matrix[3 * 4 + 0] * v.w;
+	result.y = matrix[0 * 4 + 1] * v.x + matrix[1 * 4 + 1] * v.y + matrix[2 * 4 + 1] * v.z + matrix[3 * 4 + 1] * v.w;
+	result.z = matrix[0 * 4 + 2] * v.x + matrix[1 * 4 + 2] * v.y + matrix[2 * 4 + 2] * v.z + matrix[3 * 4 + 2] * v.w;
+	result.w = matrix[0 * 4 + 3] * v.x + matrix[1 * 4 + 3] * v.y + matrix[2 * 4 + 3] * v.z + matrix[3 * 4 + 3] * v.w;
 	return result;
 #endif
 }

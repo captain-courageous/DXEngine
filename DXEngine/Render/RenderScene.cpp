@@ -286,10 +286,10 @@ void RenderSubsystem::DrawCoronasDX(VisibleFrame* frame)
 			continue;
 
 		TextureInfo texinfo;
-		engine->render->UpdateTextureInfo(texinfo, skinFrame);
+		engine->render->UpdateTileTextureInfo(texinfo, skinFrame);
 
-		float width = (float)skinFrame->UsedMipmaps.front().Width;
-		float height = (float)skinFrame->UsedMipmaps.front().Height;
+		float width = (float)skinFrame->USize();
+		float height = (float)skinFrame->VSize();
 		float size = light->DrawScale() * frame->Frame.FX * 0.2f;
 		// The hue's colour, whitened by the saturation, times the fade -- as
 		// DrawFrame works it out itself, with none of the light maps'

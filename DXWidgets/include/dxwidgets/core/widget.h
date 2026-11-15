@@ -119,6 +119,7 @@ public:
 	bool IsVisible();
 	bool IsHidden();
 	bool IsFullscreen();
+	DisplayWindow* GetDisplayWindow() const { return Window() ? Window()->DispWindow.get() : nullptr; }
 
 	void SetFocus();
 	void SetEnabled(bool value);

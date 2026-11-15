@@ -10,6 +10,7 @@
 #include <mutex>
 #include "Utils/Exception.h"
 #include <atomic>
+#include <condition_variable>
 #include <map>
 #include <cmath>
 #include <queue>
@@ -53,7 +54,9 @@ public:
 		// limiter, on for an integer output, turned the sum down instead
 		const ALCint ctxAttribs[] =
 		{
+#ifndef __APPLE__
 			ALC_FREQUENCY, inFrequency,
+#endif
 			ALC_REFRESH, 60,
 			ALC_SYNC, ALC_FALSE,
 			ALC_OUTPUT_LIMITER_SOFT, ALC_FALSE,
@@ -75,6 +78,11 @@ public:
 			alcCloseDevice(alDevice);
 			Exception::Throw("Failed to make OpenAL context current");
 		}
+
+		ALCint actualFreq = inFrequency;
+		alcGetIntegerv(alDevice, ALC_FREQUENCY, 1, &actualFreq);
+		if (actualFreq >= 8000 && actualFreq <= 48000)
+			frequency = actualFreq;
 
 		// Deus Ex's sounds are mixed as Galaxy mixes them, in Galaxy's 32
 		// channel records, the mix streamed through one source at OutputRate,
@@ -102,9 +110,11 @@ public:
 
 	~OpenALAudioDevice()
 	{
-		std::unique_lock lock(musicThreadData.mutex);
-		musicThreadData.exitFlag = true;
-		lock.unlock();
+		{
+			std::unique_lock lock(musicThreadData.mutex);
+			musicThreadData.exitFlag = true;
+		}
+		musicThreadData.cv.notify_all();
 		musicThreadData.thread.join();
 
 		StopMixStream();
@@ -171,6 +181,8 @@ public:
 		musicThreadData.volume = volume;
 		musicThreadData.generation++;
 		musicThreadData.currentOrder.store(-1);
+		lock.unlock();
+		musicThreadData.cv.notify_one();
 	}
 
 	int GetMusicOrder() override
@@ -200,6 +212,8 @@ public:
 			return false;
 		musicThreadData.jumpOrder = order;
 		musicThreadData.currentOrder.store(sections >= 0 ? (order + 255) % 256 : order);
+		lock.unlock();
+		musicThreadData.cv.notify_one();
 		return true;
 	}
 
@@ -398,7 +412,10 @@ public:
 				StopMusicBuffers(musicPlaying);
 				currentMusic = std::move(musicThreadData.music);
 				if (currentMusic)
+				{
 					currentMusic->SetMono(!stereo);
+					currentMusic->SetOutputFrequency(frequency);
+				}
 				musicThreadData.musicUpdate = false;
 				mixer->SetMusicTempo(0.0);
 			}
@@ -502,7 +519,19 @@ public:
 				musicPlaying = false;
 			}
 			using namespace std::chrono_literals;
-			std::this_thread::sleep_for(5ms);
+			std::unique_lock sleepLock(musicThreadData.mutex);
+			if (!currentMusic)
+			{
+				musicThreadData.cv.wait(sleepLock, [&]() {
+					return musicThreadData.exitFlag || musicThreadData.musicUpdate;
+				});
+			}
+			else
+			{
+				musicThreadData.cv.wait_for(sleepLock, 15ms, [&]() {
+					return musicThreadData.exitFlag || musicThreadData.musicUpdate || musicThreadData.jumpOrder >= 0;
+				});
+			}
 		}
 	}
 
@@ -528,7 +557,11 @@ public:
 
 	void StopMixStream()
 	{
-		mixExit = true;
+		{
+			std::lock_guard<std::mutex> lock(mixMutex);
+			mixExit = true;
+		}
+		mixCv.notify_all();
 		mixThread.join();
 		alSourceStop(alMixSource);
 		alSourcei(alMixSource, AL_BUFFER, 0);
@@ -576,8 +609,9 @@ public:
 			if (state != AL_PLAYING)
 				alSourcePlay(alMixSource);
 
-			using namespace std::chrono_literals;
-			std::this_thread::sleep_for(2ms);
+			const int sleepMs = (mixBufferCount >= 3) ? 10 : 4;
+			std::unique_lock<std::mutex> lock(mixMutex);
+			mixCv.wait_for(lock, std::chrono::milliseconds(sleepMs), [&]() { return mixExit.load(); });
 		}
 	}
 
@@ -595,6 +629,8 @@ public:
 	int mixBufferCount = 4;
 	bool stereo = true;
 	std::thread mixThread;
+	std::mutex mixMutex;
+	std::condition_variable mixCv;
 	std::atomic<bool> mixExit{ false };
 
 	template<class T> class RingQueue
@@ -722,6 +758,7 @@ public:
 	struct
 	{
 		std::mutex mutex;
+		std::condition_variable cv;
 		std::thread thread;
 		bool exitFlag = false;
 		std::unique_ptr<AudioSource> music;

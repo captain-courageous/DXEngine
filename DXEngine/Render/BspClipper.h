@@ -122,7 +122,9 @@ private:
 	float weightsbuffer[max_additional_vertices * 3 * 2];
 	float* weights = nullptr;
 
+	enum { TargetOcclusionHeight = 1080 };
 	int ViewportWidth = MaxWidth;
 	int ViewportHeight = MaxHeight;
 	float PixelSample = 0.5f;
+	bool OcclusionCoarse = false;
 };

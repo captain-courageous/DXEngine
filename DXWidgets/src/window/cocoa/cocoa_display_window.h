@@ -27,6 +27,9 @@ public:
     void SetWindowMinSize(int width, int height) override;
     void SetWindowMaxSize(int width, int height) override;
     bool IsWindowFullscreen() override;
+    bool IsWindowMinimized() const override;
+    bool IsWindowFocused() const override;
+    bool IsWindowOccluded() const override;
     void Hide() override;
     void Activate() override;
 

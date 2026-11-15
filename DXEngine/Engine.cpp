@@ -191,6 +191,15 @@ Engine::Engine(GameLaunchInfo launchinfo) : LaunchInfo(launchinfo)
 	DefaultTexture = UObject::Cast<UTexture>(packages->GetPackage("Engine")->GetUObject("Texture", "DefaultTexture"));
 
 	floatprop = GC::Alloc<UFloatProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
+	objprop = GC::Alloc<UObjectProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
+	vecprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
+	colorprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
+	// A Color, as a package's struct property of one is typed
+	// (UStructProperty::Load): CursorRequested's out color is copied into the
+	// event's own Color, which takes no plain struct (ToColor), where a
+	// vector or a rotator takes one
+	colorprop->ValueType = ExpressionValueType::ValueColor;
+	rotprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
 
 	Frame::Guards = true;
 	Frame::NoRunaway = OriginalCommandLine::Get().Param("norunaway");
@@ -369,16 +378,6 @@ void Engine::Run()
 		RunCommand(viewport->Actor(), "exec " + execFile);
 	LauncherLine::Get().Ready();
 
-	objprop = GC::Alloc<UObjectProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
-	vecprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
-	colorprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
-	// A Color, as a package's struct property of one is typed
-	// (UStructProperty::Load): CursorRequested's out color is copied into the
-	// event's own Color, which takes no plain struct (ToColor), where a
-	// vector or a rotator takes one
-	colorprop->ValueType = ExpressionValueType::ValueColor;
-	rotprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
-
 	if (const char* stress = std::getenv("DXE_GC_STRESS"))
 		GarbageStressFrames = std::max(std::atoi(stress), 0);
 
@@ -523,7 +522,9 @@ void Engine::Run()
 		if (PendingLevel)
 			TickPendingLevel(realTimeElapsed);
 
-		Draw(realTimeElapsed, levelElapsed, PendingLevel.get());
+		const bool occluded = window && (window->IsWindowMinimized() || window->IsWindowOccluded());
+		if (!occluded)
+			Draw(realTimeElapsed, levelElapsed, PendingLevel.get());
 
 		// A save asked for during the draw: a console's tick
 		WritePendingSave();
@@ -2724,7 +2725,15 @@ float Engine::CalcTimeElapsed()
 		maxTickRate = std::clamp(LaunchInfo.lanPlay ? LevelNetDriver->LanServerMaxTickRate : LevelNetDriver->NetServerMaxTickRate, 10, 120);
 	else if (LevelNetDriver && !LevelNetDriver->ServerConnection)
 		maxTickRate = 144;
-	if (maxTickRate > 0 && lastTime != 0)
+	const bool isUnfocusedIdle = !LevelNetDriver && window && (!windowFocused || !window->IsWindowFocused() || window->IsWindowMinimized() || window->IsWindowOccluded());
+	if (isUnfocusedIdle && lastTime != 0)
+	{
+		uint64_t minDelta = 50'000; // ~20 Hz when unfocused/minimized in single-player; never caps active gameplay
+		uint64_t now = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+		if (now - lastTime < minDelta)
+			std::this_thread::sleep_for(microseconds(minDelta - (now - lastTime)));
+	}
+	else if (maxTickRate > 0 && lastTime != 0)
 	{
 		uint64_t minDelta = 1'000'000 / (uint64_t)maxTickRate;
 		uint64_t now = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
@@ -3976,11 +3985,13 @@ void Engine::OnWindowClose()
 
 void Engine::OnWindowActivated()
 {
+	windowFocused = true;
 	//SetPause(false);
 }
 
 void Engine::OnWindowDeactivated()
 {
+	windowFocused = false;
 	//SetPause(true);
 	if (window)
 		window->UnlockCursor();

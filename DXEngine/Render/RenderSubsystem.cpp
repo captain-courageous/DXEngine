@@ -21,11 +21,12 @@ RenderSubsystem::RenderSubsystem(RenderDevice* renderdevice) : Device(renderdevi
 {
 }
 
-void RenderSubsystem::DrawGame(float levelTimeElapsed)
+void RenderSubsystem::DrawGame(float levelTimeElapsed, bool present)
 {
 	DrawnSinceFlush = true;
 	LevelTimeElapsed = levelTimeElapsed;
-	TextureClock = UTexture::ClockNow();
+	if (present)
+		TextureClock = UTexture::ClockNow();
 	UPlayerPawn* viewer = UObject::TryCast<UPlayerPawn>(engine->viewport->Actor());
 	FrameViewerSprite = viewer && viewer->Sprite() && !viewer->Sprite()->UsedMipmaps.empty() ? viewer->Sprite() : nullptr;
 
@@ -50,10 +51,13 @@ void RenderSubsystem::DrawGame(float levelTimeElapsed)
 	// since the last frame drawn, a load's painted frame among them, as the
 	// original's viewport takes it at each lock (Engine.dll UViewport::Lock
 	// and Unlock)
-	auto now = std::chrono::steady_clock::now();
-	float frameElapsed = LastDrawTime == std::chrono::steady_clock::time_point() ? 0.0f : std::chrono::duration<float>(now - LastDrawTime).count();
-	LastDrawTime = now;
-	engine->Level->Light.Tick(frameElapsed);
+	if (present)
+	{
+		auto now = std::chrono::steady_clock::now();
+		float frameElapsed = LastDrawTime == std::chrono::steady_clock::time_point() ? 0.0f : std::chrono::duration<float>(now - LastDrawTime).count();
+		LastDrawTime = now;
+		engine->Level->Light.Tick(frameElapsed);
+	}
 
 	Stats.Frames = 0;
 	Stats.Surfaces = 0;
@@ -84,7 +88,8 @@ void RenderSubsystem::DrawGame(float levelTimeElapsed)
 	// Every frame, the world drawn or not: a texture the windows or the
 	// canvas alone draw (a menu over the snapshot, the credits) steps on, as
 	// the original's by its own time (fire-dll.md, stepping)
-	TextureFrameCounter++;
+	if (present)
+		TextureFrameCounter++;
 
 	ResetCanvas();
 	PreRender();
@@ -113,7 +118,7 @@ void RenderSubsystem::DrawGame(float levelTimeElapsed)
 
 	PostRender();
 
-	Device->Unlock(true);
+	Device->Unlock(present);
 	FrameInProgress = false;
 	FrameDrawn = true;
 }
@@ -122,6 +127,13 @@ bool RenderSubsystem::ReadLastFrame(Array<TextureColor>& pixels, int& width, int
 {
 	if (FrameInProgress || !FrameDrawn)
 		return false;
+
+	if (Device->NeedsReadableFrameForReadPixels())
+	{
+		Device->SetCaptureReadableFrame(true);
+		DrawGame(0.0f, false);
+		Device->SetCaptureReadableFrame(false);
+	}
 
 	Device->LastFrameSize(width, height);
 	if (width <= 0 || height <= 0)
@@ -209,7 +221,7 @@ void RenderSubsystem::UpdateTextureInfo(TextureInfo& info, const Poly& poly, UTe
 	}
 }
 
-void RenderSubsystem::UpdateTextureInfo(TextureInfo& info, UTexture* texture)
+static void FillTextureInfo(TextureInfo& info, UTexture* texture, float scale, bool takeChange)
 {
 	info.Texture = texture;
 	info.CacheID = (uint64_t)(ptrdiff_t)texture;
@@ -217,8 +229,8 @@ void RenderSubsystem::UpdateTextureInfo(TextureInfo& info, UTexture* texture)
 	if (!info.Texture)
 		return;
 
-	info.UScale = texture->DrawScale();
-	info.VScale = texture->DrawScale();
+	info.UScale = scale;
+	info.VScale = scale;
 	info.Format = texture->UsedFormat;
 	info.Mips = texture->UsedMipmaps.data();
 	info.NumMips = (int)texture->UsedMipmaps.size();
@@ -226,9 +238,20 @@ void RenderSubsystem::UpdateTextureInfo(TextureInfo& info, UTexture* texture)
 	info.VSize = texture->VSize();
 	if (texture->Palette())
 		info.Palette = (TextureColor*)texture->Palette()->Colors.data();
-	ApplyDetailLOD(info);
+	RenderSubsystem::ApplyDetailLOD(info);
 
-	info.bRealtimeChanged = texture->TakeChange();
+	if (takeChange)
+		info.bRealtimeChanged = texture->TakeChange();
+}
+
+void RenderSubsystem::UpdateTextureInfo(TextureInfo& info, UTexture* texture)
+{
+	FillTextureInfo(info, texture, texture ? texture->DrawScale() : 1.0f, true);
+}
+
+void RenderSubsystem::UpdateTileTextureInfo(TextureInfo& info, UTexture* texture, bool takeChange)
+{
+	FillTextureInfo(info, texture, 1.0f, takeChange);
 }
 
 // The texture from its detail level's mip down, as the original's
@@ -242,10 +265,9 @@ void RenderSubsystem::ApplyDetailLOD(TextureInfo& info)
 	int lod = info.Texture->DetailLOD();
 	if (lod <= 0 || lod >= info.NumMips)
 		return;
-	const UnrealMipmap& top = info.Mips[0];
 	const UnrealMipmap& mip = info.Mips[lod];
-	info.UScale *= (float)top.Width / (float)mip.Width;
-	info.VScale *= (float)top.Height / (float)mip.Height;
+	info.UScale *= (float)info.USize / (float)mip.Width;
+	info.VScale *= (float)info.VSize / (float)mip.Height;
 	info.USize = mip.Width;
 	info.VSize = mip.Height;
 	info.Mips += lod;

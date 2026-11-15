@@ -429,7 +429,12 @@ public:
 
 	int GetFrequency() override
 	{
-		return 44100;
+		return outputFrequency;
+	}
+
+	void SetOutputFrequency(int freq) override
+	{
+		outputFrequency = std::clamp(freq, 8000, 48000);
 	}
 
 	int GetChannels() override
@@ -508,6 +513,7 @@ public:
 	openmpt::module* module;
 	bool mono = false;
 	bool galaxy = false;        // an IT song, played as Galaxy plays it
+	int outputFrequency = 44100;
 };
 
 std::unique_ptr<AudioSource> AudioSource::CreateMp3(Array<uint8_t> filedata)

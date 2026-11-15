@@ -13,7 +13,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include <dispatch/dispatch.h>
 #include <objc/runtime.h>
-#include <map>
+#include <unordered_map>
 #include <vector>
 #include <stdexcept>
 
@@ -119,7 +119,10 @@ id<MTLTexture> UploadOrUpdateMetalTexture(id<MTLDevice> device, id<MTLTexture> e
         auto& mip = info.Mips[baseMip + level];
         if (mip.Width != std::max(base.Width >> level, 1) || mip.Height != std::max(base.Height >> level, 1))
             throw std::runtime_error("Metal: inconsistent mip dimensions");
-        if (mip.Data.size() < size_t(mip.Width) * mip.Height * inputSize || (info.Format == TextureFormat::P8 && !info.Palette))
+        const size_t expectedBytes = info.Format == TextureFormat::BC1
+            ? size_t((mip.Width + 3) / 4) * ((mip.Height + 3) / 4) * 8
+            : size_t(mip.Width) * mip.Height * inputSize;
+        if (mip.Data.size() < expectedBytes || (info.Format == TextureFormat::P8 && !info.Palette))
             throw std::runtime_error("Metal: truncated texture");
         UploadMetalMipLevel(result, uploader, info, baseMip + level, level, pixelSize, inputSize, masked);
     }
@@ -191,26 +194,43 @@ class MetalRenderDevice final : public RenderDevice {
     std::array<FrameVertices,MaxFramesInFlight> verticesByFrame;
     size_t frameIndex=0;
     id<MTLRenderCommandEncoder> encoder;
-    id<MTLTexture> depth,white,lastFrame,worldColor,worldDepth;
+    id<MTLTexture> depth,white,lastFrame,worldColor,worldDepth,captureTarget;
     id<MTLRenderPipelineState> compositePipeline,gammaPipeline;
     id<MTLTexture> frameColor;
     float gammaExponent=1.0f;
+    bool captureReadableFrame=false;
     struct DrawBatch {
-        id<MTLBuffer> buffer;
+        __unsafe_unretained id<MTLBuffer> buffer = nil;
         size_t offset=0,count=0;
         uint32_t poly=0,textures=0;
         MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle;
-        std::array<id<MTLTexture>,4> images;
-        id<MTLSamplerState> sampler;
+        std::array<__unsafe_unretained id<MTLTexture>,4> images{};
+        __unsafe_unretained id<MTLSamplerState> sampler = nil;
         int depthBias=0;
     } batch;
+    struct BoundState {
+        bool valid = false;
+        bool depthWrite = false;
+        __unsafe_unretained id<MTLRenderPipelineState> pipeline = nil;
+        __unsafe_unretained id<MTLBuffer> buffer = nil;
+        std::array<__unsafe_unretained id<MTLTexture>,4> images{};
+        __unsafe_unretained id<MTLSamplerState> sampler = nil;
+        uint32_t poly = 0, textures = 0;
+        int depthBias = 0;
+        void reset() { *this = BoundState{}; }
+    } bound;
     size_t drawCalls=0;
     bool worldPass=false,worldRendering=false;
-    id<MTLSamplerState> sampler,nearest,linear,lightSampler;
-    std::map<uint32_t,id<MTLRenderPipelineState>> pipelines;
-    std::map<bool,id<MTLDepthStencilState>> depths;
+    id<MTLSamplerState> sampler,nearest,nearestClamp,linear,lightSampler;
+    std::unordered_map<uint32_t,id<MTLRenderPipelineState>> pipelines;
+    std::array<id<MTLDepthStencilState>,2> depths{};
     struct CachedTexture { int mip; id<MTLTexture> texture; };
-    std::map<std::pair<uint64_t,bool>,CachedTexture> textures;
+    struct TextureKeyHash {
+        size_t operator()(const std::pair<uint64_t,bool>& k) const noexcept {
+            return std::hash<uint64_t>{}(k.first) ^ (size_t(k.second) * 0x9e3779b97f4a7c15ULL);
+        }
+    };
+    std::unordered_map<std::pair<uint64_t,bool>,CachedTexture,TextureKeyHash> textures;
     Rect renderRect, lastFrameRect;
     mat4 transform=mat4::identity();
     SceneNode* current=nullptr;
@@ -255,9 +275,12 @@ class MetalRenderDevice final : public RenderDevice {
         if (!result) throw std::runtime_error(error.localizedDescription.UTF8String);
         pipelines[key]=result; return result;
     }
+    id<MTLTexture> presentTarget() const {
+        return captureReadableFrame ? captureTarget : drawable.texture;
+    }
     void beginPass(bool clearColor,bool clearDepth,vec4 color={}) {
         auto pass=[MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture=worldPass ? worldColor : gammaExponent!=1.0f ? frameColor : drawable.texture;
+        pass.colorAttachments[0].texture=worldPass ? worldColor : gammaExponent!=1.0f ? frameColor : presentTarget();
         pass.colorAttachments[0].loadAction=clearColor ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction=MTLStoreActionStore;
         pass.colorAttachments[0].clearColor=MTLClearColorMake(color.x,color.y,color.z,color.w);
@@ -266,31 +289,60 @@ class MetalRenderDevice final : public RenderDevice {
         pass.depthAttachment.storeAction=MTLStoreActionDontCare; pass.depthAttachment.clearDepth=1;
         encoder=[commands renderCommandEncoderWithDescriptor:pass];
         [encoder setCullMode:MTLCullModeNone];
+        [encoder setFragmentSamplerState:lightSampler atIndex:1];
+        bound.reset();
         if (current) SetSceneNode(current);
     }
     void flushDraws() {
         if (!batch.count) return;
         const bool writes=!(batch.poly&(PF_Translucent|PF_Modulated)) || (batch.poly&PF_Occlude);
-        [encoder setDepthStencilState:depths.at(writes)];
-        [encoder setVertexBuffer:batch.buffer offset:batch.offset atIndex:0];
-        for (size_t i=0;i<batch.images.size();++i) [encoder setFragmentTexture:batch.images[i] atIndex:i];
-        DrawFlags flags{batch.poly,batch.textures};
-        [encoder setFragmentBytes:&flags length:sizeof(flags) atIndex:0];
-        [encoder setFragmentSamplerState:batch.sampler atIndex:0];
-        [encoder setFragmentSamplerState:lightSampler atIndex:1];
-        [encoder setRenderPipelineState:pipeline(batch.poly)];
-        [encoder setDepthBias:float(-batch.depthBias) slopeScale:float(-batch.depthBias) clamp:0.0f];
+        id<MTLRenderPipelineState> pipe=pipeline(batch.poly);
+        if (!bound.valid || bound.depthWrite!=writes) {
+            [encoder setDepthStencilState:depths[writes ? 1 : 0]];
+            bound.depthWrite=writes;
+        }
+        if (!bound.valid || bound.buffer!=batch.buffer) {
+            [encoder setVertexBuffer:batch.buffer offset:batch.offset atIndex:0];
+            bound.buffer=batch.buffer;
+        } else {
+            [encoder setVertexBufferOffset:batch.offset atIndex:0];
+        }
+        for (size_t i=0;i<batch.images.size();++i) {
+            if (!bound.valid || bound.images[i]!=batch.images[i]) {
+                [encoder setFragmentTexture:batch.images[i] atIndex:i];
+                bound.images[i]=batch.images[i];
+            }
+        }
+        if (!bound.valid || bound.poly!=batch.poly || bound.textures!=batch.textures) {
+            DrawFlags flags{batch.poly,batch.textures};
+            [encoder setFragmentBytes:&flags length:sizeof(flags) atIndex:0];
+            bound.poly=batch.poly;
+            bound.textures=batch.textures;
+        }
+        if (!bound.valid || bound.sampler!=batch.sampler) {
+            [encoder setFragmentSamplerState:batch.sampler atIndex:0];
+            bound.sampler=batch.sampler;
+        }
+        if (!bound.valid || bound.pipeline!=pipe) {
+            [encoder setRenderPipelineState:pipe];
+            bound.pipeline=pipe;
+        }
+        if (!bound.valid || bound.depthBias!=batch.depthBias) {
+            [encoder setDepthBias:float(-batch.depthBias) slopeScale:float(-batch.depthBias) clamp:0.0f];
+            bound.depthBias=batch.depthBias;
+        }
+        bound.valid=true;
         [encoder drawPrimitives:batch.primitive vertexStart:0 vertexCount:batch.count];
-        ++drawCalls; batch={};
+        ++drawCalls; batch=DrawBatch{};
     }
-    Vertex* reserveDraw(size_t count,TextureInfo* tex,TextureInfo* lm,uint32_t flags,MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle,TextureInfo* detail=nullptr,TextureInfo* macro=nullptr,bool fogMap=false,bool meshFog=false,bool smoothWorld=true,int depthBias=0) {
+    Vertex* reserveDraw(size_t count,TextureInfo* tex,TextureInfo* lm,uint32_t flags,MTLPrimitiveType primitive=MTLPrimitiveTypeTriangle,TextureInfo* detail=nullptr,TextureInfo* macro=nullptr,bool fogMap=false,bool meshFog=false,bool smoothWorld=true,int depthBias=0,bool clamp=false) {
         if (!encoder || !count) return nullptr;
         if (count>device.maxBufferLength/sizeof(Vertex)) throw std::runtime_error("Metal: too many vertices");
         const bool masked=(flags&PF_Masked)!=0;
         if (flags&PF_Translucent) flags&=~PF_Masked;
-        std::array<id<MTLTexture>,4> images={texture(tex,masked),texture(lm),texture(detail),texture(macro)};
+        std::array<__unsafe_unretained id<MTLTexture>,4> images={texture(tex,masked),texture(lm),texture(detail),texture(macro)};
         const uint32_t textureFlags=(lm ? 1u : 0u) | (detail ? (fogMap ? 8u : 2u) : 0u) | (macro ? 4u : 0u) | (meshFog ? 16u : 0u);
-        id<MTLSamplerState> selected=(flags&PF_NoSmooth) ? nearest : smoothWorld ? sampler : linear;
+        __unsafe_unretained id<MTLSamplerState> selected=(flags&PF_NoSmooth) ? (clamp ? nearestClamp : nearest) : clamp ? lightSampler : smoothWorld ? sampler : linear;
         auto [buffer,offset]=verticesByFrame[frameIndex].reserve(device,count*sizeof(Vertex));
         // Only adjacent draws merge; never sort transparent geometry or cross a state boundary.
         if (batch.count && (batch.poly!=flags || batch.textures!=textureFlags || batch.primitive!=primitive || batch.images!=images || batch.sampler!=selected || batch.depthBias!=depthBias || batch.buffer!=buffer || batch.offset+batch.count*sizeof(Vertex)!=offset)) flushDraws();
@@ -298,11 +350,11 @@ class MetalRenderDevice final : public RenderDevice {
         batch.count+=count;
         return reinterpret_cast<Vertex*>(static_cast<uint8_t*>(buffer.contents)+offset);
     }
-    void prepareFrameColor() {
+    void prepareFrameColor(id<MTLTexture> target) {
         gammaExponent=MetalGammaExponent(Brightness);
         drawCalls=0;
-        if (gammaExponent!=1.0f && (!frameColor || frameColor.width!=drawable.texture.width || frameColor.height!=drawable.texture.height)) {
-            auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
+        if (gammaExponent!=1.0f && (!frameColor || frameColor.width!=target.width || frameColor.height!=target.height)) {
+            auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:target.width height:target.height mipmapped:NO];
             desc.storageMode=MTLStorageModePrivate; desc.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
             frameColor=[device newTextureWithDescriptor:desc];
             if (!frameColor) throw std::runtime_error("Metal: gamma target allocation failed");
@@ -311,7 +363,7 @@ class MetalRenderDevice final : public RenderDevice {
     void applyGamma() {
         if (gammaExponent==1.0f) return;
         auto pass=[MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture=drawable.texture;
+        pass.colorAttachments[0].texture=presentTarget();
         pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction=MTLStoreActionStore;
         auto output=[commands renderCommandEncoderWithDescriptor:pass];
@@ -327,10 +379,11 @@ class MetalRenderDevice final : public RenderDevice {
         return {2*x/node->FX-1,1-2*y/node->FY,std::clamp(z/32768.0f,0.0f,1.0f),1};
     }
     explicit MetalRenderDevice(CAMetalLayer* nativeLayer) {
+        GLTextureUploader::SetS3TCSupported(false);
         layer=nativeLayer;
         if (!layer) throw std::runtime_error("Metal: no native layer");
         device=layer.device ?: MTLCreateSystemDefaultDevice(); layer.device=device;
-        layer.pixelFormat=MTLPixelFormatBGRA8Unorm; layer.framebufferOnly=NO;
+        layer.pixelFormat=MTLPixelFormatBGRA8Unorm; layer.framebufferOnly=YES; layer.opaque=YES;
         layer.maximumDrawableCount=MaxFramesInFlight;
         inFlightSemaphore=dispatch_semaphore_create(MaxFramesInFlight);
         queue=[device newCommandQueue];
@@ -341,8 +394,9 @@ class MetalRenderDevice final : public RenderDevice {
         sd.mipFilter=MTLSamplerMipFilterLinear; sd.maxAnisotropy=8; sampler=[device newSamplerStateWithDescriptor:sd];
         sd.mipFilter=MTLSamplerMipFilterNotMipmapped; sd.maxAnisotropy=1;
         sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest; nearest=[device newSamplerStateWithDescriptor:sd];
-        sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterLinear;
         sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+        nearestClamp=[device newSamplerStateWithDescriptor:sd];
+        sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterLinear;
         lightSampler=[device newSamplerStateWithDescriptor:sd];
         auto composite=[MTLRenderPipelineDescriptor new];
         composite.vertexFunction=[library newFunctionWithName:@"compositeVS"];
@@ -355,7 +409,7 @@ class MetalRenderDevice final : public RenderDevice {
         composite.depthAttachmentPixelFormat=MTLPixelFormatInvalid;
         gammaPipeline=[device newRenderPipelineStateWithDescriptor:composite error:&error];
         if (!gammaPipeline) throw std::runtime_error(error.localizedDescription.UTF8String);
-        for (bool write:{false,true}) { auto d=[MTLDepthStencilDescriptor new]; d.depthCompareFunction=MTLCompareFunctionLessEqual; d.depthWriteEnabled=write; depths[write]=[device newDepthStencilStateWithDescriptor:d]; }
+        for (bool write:{false,true}) { auto d=[MTLDepthStencilDescriptor new]; d.depthCompareFunction=MTLCompareFunctionLessEqual; d.depthWriteEnabled=write; depths[write ? 1 : 0]=[device newDepthStencilStateWithDescriptor:d]; }
         white=[device newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO]];
         uint32_t pixel=0xffffffff; [white replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&pixel bytesPerRow:4];
         fprintf(stderr,"Native ARM64 Metal backend: %s\n",device.name.UTF8String);
@@ -387,19 +441,32 @@ public:
         dispatch_semaphore_wait(inFlightSemaphore, DISPATCH_TIME_FOREVER);
         frameLocked=true;
         verticesByFrame[frameIndex].reset();
-        drawable=[layer nextDrawable];
-        if (!drawable) {
+        id<MTLTexture> t = nil;
+        if (captureReadableFrame) {
+            NSUInteger w = std::max<NSUInteger>(1, NSUInteger(targetSize.width));
+            NSUInteger h = std::max<NSUInteger>(1, NSUInteger(targetSize.height));
+            if (!captureTarget || captureTarget.width!=w || captureTarget.height!=h) {
+                auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:w height:h mipmapped:NO];
+                desc.storageMode=MTLStorageModeShared;
+                desc.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
+                captureTarget=[device newTextureWithDescriptor:desc];
+            }
+            t = captureTarget;
+        } else {
+            drawable=[layer nextDrawable];
+            t = drawable ? drawable.texture : nil;
+        }
+        if (!t) {
             frameLocked=false;
             dispatch_semaphore_signal(inFlightSemaphore);
             if (framePool) { objc_autoreleasePoolPop(framePool); framePool=nullptr; }
             return;
         }
-        auto t=drawable.texture;
         if (!depth || depth.width!=t.width || depth.height!=t.height) {
             auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:t.width height:t.height mipmapped:NO];
             desc.storageMode=MTLStorageModePrivate; desc.usage=MTLTextureUsageRenderTarget; depth=[device newTextureWithDescriptor:desc];
         }
-        prepareFrameColor();
+        prepareFrameColor(t);
         commands=[queue commandBuffer]; current=nullptr; beginPass(true,true,engine->classicAspectRatio ? vec4(0,0,0,1) : clear);
     }
     void Unlock(bool blit) override {
@@ -410,7 +477,8 @@ public:
         flushDraws();
         [encoder endEncoding]; encoder=nil;
         applyGamma();
-        lastFrame=drawable.texture; lastFrameRect=renderRect;
+        id<MTLTexture> target = presentTarget();
+        lastFrame=captureReadableFrame ? captureTarget : nil; lastFrameRect=renderRect;
         lastSubmitted = commands;
         if (frameLocked) {
             frameLocked = false;
@@ -422,11 +490,11 @@ public:
                 dispatch_semaphore_signal(sem);
             }];
         }
-        if (blit) [commands presentDrawable:drawable];
+        if (blit && drawable) [commands presentDrawable:drawable];
         [commands commit];
         frameIndex=(frameIndex+1)%MaxFramesInFlight;
         if (!frameReported) {
-            fprintf(stderr,"Metal frame submitted: %lux%lu; triple-buffered display sync; %zu GPU frames in flight\n",(unsigned long)lastFrame.width,(unsigned long)lastFrame.height,MaxFramesInFlight);
+            fprintf(stderr,"Metal frame submitted: %lux%lu; triple-buffered display sync; %zu GPU frames in flight\n",(unsigned long)target.width,(unsigned long)target.height,MaxFramesInFlight);
             frameReported=true;
         }
         commands=nil;drawable=nil;current=nullptr;
@@ -461,7 +529,9 @@ public:
         [encoder setViewport:MTLViewport{renderRect.x,renderRect.y,renderRect.width,renderRect.height,0,1}];
         [encoder setScissorRect:MTLScissorRect{NSUInteger(renderRect.x),NSUInteger(renderRect.y),NSUInteger(renderRect.width),NSUInteger(renderRect.height)}];
         [encoder setRenderPipelineState:compositePipeline];
-        [encoder setDepthStencilState:depths.at(false)];
+        [encoder setDepthStencilState:depths[0]];
+        bound.reset();
+        [encoder setFragmentSamplerState:lightSampler atIndex:1];
         [encoder setFragmentTexture:worldColor atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         if (current) SetSceneNode(current);
@@ -531,7 +601,8 @@ public:
         if (!current) SetSceneNode(frame);
         if (flags&PF_Modulated) color=vec4(1);
         u*=GetUMult(info);ul*=GetUMult(info);v*=GetVMult(info);vl*=GetVMult(info);
-        Vertex* out=reserveDraw(6,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,false,worldRendering);
+        const bool clamp=(u>=0.0f && u+ul<=1.00001f && v>=0.0f && v+vl<=1.00001f);
+        Vertex* out=reserveDraw(6,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,false,worldRendering,0,clamp);
         if (!out) return;
         out[0]={screen(frame,x,y,z),color,{u,v},{}};
         out[1]={screen(frame,x+w,y,z),color,{u+ul,v},{}};
@@ -556,14 +627,24 @@ public:
         width=lastFrame ? int(lastFrameRect.width) : 0;
         height=lastFrame ? int(lastFrameRect.height) : 0;
     }
+    bool NeedsReadableFrameForReadPixels() const override {
+        return !lastFrame || lastFrame.framebufferOnly;
+    }
+    void SetCaptureReadableFrame(bool enable) override {
+        captureReadableFrame = enable;
+    }
     void ReadPixels(TextureColor* pixels) override {
-        if (!lastFrame || !pixels) return;
+        if (!lastFrame || !pixels || lastFrame.framebufferOnly) return;
         if (lastSubmitted) {
             [lastSubmitted waitUntilCompleted];
             if (lastSubmitted.error) throw std::runtime_error(lastSubmitted.error.localizedDescription.UTF8String);
         }
         [lastFrame getBytes:pixels bytesPerRow:NSUInteger(lastFrameRect.width)*4 fromRegion:MTLRegionMake2D(lastFrameRect.x,lastFrameRect.y,lastFrameRect.width,lastFrameRect.height) mipmapLevel:0];
         for(size_t i=0;i<size_t(lastFrameRect.width)*size_t(lastFrameRect.height);++i) std::swap(pixels[i].R,pixels[i].B);
+        if (lastFrame == captureTarget) {
+            lastFrame = nil;
+            captureTarget = nil;
+        }
     }
     void EndFlash() override {
         if(!current || (flashScale==vec4(0.5f,0.5f,0.5f,0) && flashFog==vec4(0))) return;

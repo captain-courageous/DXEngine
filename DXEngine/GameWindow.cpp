@@ -58,6 +58,24 @@ int GameWindow::GetPixelHeight()
 #endif
 }
 
+bool GameWindow::IsWindowMinimized() const
+{
+	auto* disp = GetDisplayWindow();
+	return disp ? disp->IsWindowMinimized() : false;
+}
+
+bool GameWindow::IsWindowFocused() const
+{
+	auto* disp = GetDisplayWindow();
+	return disp ? disp->IsWindowFocused() : true;
+}
+
+bool GameWindow::IsWindowOccluded() const
+{
+	auto* disp = GetDisplayWindow();
+	return disp ? disp->IsWindowOccluded() : false;
+}
+
 void GameWindow::ToggleWindowFullscreen(Size newResolution)
 {
 	if (this->IsFullscreen())

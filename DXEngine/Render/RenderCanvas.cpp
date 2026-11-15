@@ -219,17 +219,7 @@ void RenderSubsystem::DrawTile(UTexture* Tex, float x, float y, float XL, float 
 	UpdateTexture(Tex);
 
 	TextureInfo texinfo;
-	texinfo.CacheID = (uint64_t)(ptrdiff_t)Tex;
-	texinfo.Texture = Tex;
-	texinfo.Format = texinfo.Texture->UsedFormat;
-	texinfo.Mips = Tex->UsedMipmaps.data();
-	texinfo.NumMips = (int)Tex->UsedMipmaps.size();
-	texinfo.USize = Tex->USize();
-	texinfo.VSize = Tex->VSize();
-	if (Tex->Palette())
-		texinfo.Palette = (TextureColor*)Tex->Palette()->Colors.data();
-	ApplyDetailLOD(texinfo);
-	texinfo.bRealtimeChanged = Tex->TakeChange();
+	UpdateTileTextureInfo(texinfo, Tex, true);
 
 	if (Tex->bMasked())
 		flags |= PF_Masked;
@@ -246,16 +236,7 @@ void RenderSubsystem::DrawTileClipped(UTexture* Tex, float orgX, float orgY, flo
 	UpdateTexture(Tex);
 
 	TextureInfo texinfo;
-	texinfo.CacheID = (uint64_t)(ptrdiff_t)Tex;
-	texinfo.Texture = Tex;
-	texinfo.Format = texinfo.Texture->UsedFormat;
-	texinfo.Mips = Tex->UsedMipmaps.data();
-	texinfo.NumMips = (int)Tex->UsedMipmaps.size();
-	texinfo.USize = Tex->USize();
-	texinfo.VSize = Tex->VSize();
-	if (Tex->Palette())
-		texinfo.Palette = (TextureColor*)Tex->Palette()->Colors.data();
-	ApplyDetailLOD(texinfo);
+	UpdateTileTextureInfo(texinfo, Tex, false);
 
 	if (Tex->bMasked())
 		flags |= PF_Masked;

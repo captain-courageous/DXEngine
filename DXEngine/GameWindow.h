@@ -131,6 +131,9 @@ public:
 
 	int GetPixelWidth();
 	int GetPixelHeight();
+	bool IsWindowMinimized() const;
+	bool IsWindowFocused() const;
+	bool IsWindowOccluded() const;
 
 	void ToggleWindowFullscreen(Size newResolution);
 

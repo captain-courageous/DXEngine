@@ -199,7 +199,7 @@ void UDXEngineAudioDevice::InitDevice()
 	// (bugs.md AUD.11).
 	try
 	{
-		m_Device = AudioDevice::Create(OutputRate.frequency, 256, 16, 256, Latency, UseStereo);
+		m_Device = AudioDevice::Create(OutputRate.frequency, 256, 8, 2048, Latency, UseStereo);
 		LogMessage("Audio device initialized");
 	}
 	catch (const std::exception& e)
@@ -936,6 +936,13 @@ void UDXEngineAudioDevice::StopEffects()
 	SoundSerials.clear();
 	// Set again from the next level's zones.
 	m_ReverbZone = nullptr;
+
+	// Scripts like MissionIntro/MissionEndgame capture their own Actor.SoundVolume
+	// default (128) and call SetInstantSoundVolume in PreTravel; restore the user's
+	// configured volumes on map transitions.
+	MusicVolume = MusicVolumeSetting;
+	SoundVolume = SoundVolumeSetting;
+	SpeechVolume = SpeechVolumeSetting;
 }
 
 void UDXEngineAudioDevice::StopSounds()

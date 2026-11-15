@@ -9,6 +9,8 @@
 #include "Math/coords.h"
 #include "PropertyOffsets.h"
 #include "GC/GC.h"
+#include <atomic>
+#include <cstring>
 #include <set>
 #include <optional>
 
@@ -423,6 +425,39 @@ public:
 	template<typename T>
 	static T* TryCast(UObject* obj)
 	{
+		if (!obj)
+			return nullptr;
+
+		// Fast path: C++ objects with identical vtable pointers share the same dynamic type,
+		// avoiding expensive libc++abi RTTI hierarchy walks in hot rendering/tick loops.
+		uintptr_t vptr = 0;
+		std::memcpy(&vptr, static_cast<const void*>(obj), sizeof(vptr));
+		if ((vptr & uintptr_t(3)) == 0 && vptr != 0)
+		{
+			static std::atomic<uintptr_t> cache[16]{};
+			const size_t idx = ((vptr >> 4) ^ (vptr >> 13)) & 15;
+			const uintptr_t entry = cache[idx].load(std::memory_order_relaxed);
+			if ((entry & ~uintptr_t(3)) == vptr)
+				return (entry & 1) ? reinterpret_cast<T*>(obj) : nullptr;
+
+			try
+			{
+				T* res = dynamic_cast<T*>(obj);
+				if (!res)
+					cache[idx].store(vptr | uintptr_t(2), std::memory_order_relaxed);
+				else if (reinterpret_cast<const void*>(res) == reinterpret_cast<const void*>(obj))
+					cache[idx].store(vptr | uintptr_t(1), std::memory_order_relaxed);
+				return res;
+			}
+			catch (const std::exception& e)
+			{
+#if defined(_DEBUG) && defined(WIN32)
+				DebugBreak();
+#endif
+				Exception::Throw(e.what());
+			}
+		}
+
 		try
 		{
 			return dynamic_cast<T*>(obj);

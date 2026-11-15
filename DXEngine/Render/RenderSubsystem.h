@@ -27,7 +27,7 @@ public:
 	void PopWindowGC();
 	Array<std::function<void()>> WindowGCStack;
 
-	void DrawGame(float levelTimeElapsed);
+	void DrawGame(float levelTimeElapsed, bool present = true);
 	void OnMapLoaded();
 
 	// The collector's: the coronas, corona lights and iterator actors let
@@ -128,6 +128,9 @@ public:
 	void UpdateTextureInfo(TextureInfo& info, BspSurface& surface, UTexture* texture, float ZoneUPanSpeed, float ZoneVPanSpeed);
 	void UpdateTextureInfo(TextureInfo& info, const Poly& poly, UTexture* texture, float ZoneUPanSpeed, float ZoneVPanSpeed);
 	void UpdateTextureInfo(TextureInfo& info, UTexture* texture);
+	// Populate TextureInfo for DrawTile in texture pixel space (UScale/VScale = 1 before LOD),
+	// since DrawTile passes mip-0 pixel UVs rather than world DrawScale units.
+	void UpdateTileTextureInfo(TextureInfo& info, UTexture* texture, bool takeChange = true);
 	static void ApplyDetailLOD(TextureInfo& info);
 
 

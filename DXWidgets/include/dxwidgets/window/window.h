@@ -355,6 +355,9 @@ public:
 	virtual void SetWindowMinSize(int width, int height) = 0;
 	virtual void SetWindowMaxSize(int width, int height) = 0;
 	virtual bool IsWindowFullscreen() = 0;
+	virtual bool IsWindowMinimized() const { return false; }
+	virtual bool IsWindowFocused() const { return true; }
+	virtual bool IsWindowOccluded() const { return false; }
 	virtual void Hide() = 0;
 	virtual void Activate() = 0;
 	virtual void ShowCursor(bool enable) = 0;
