@@ -1285,9 +1285,10 @@ UObject* UWindow::NewChild(UObject* NewClass, std::optional<bool> bShow)
 			ExpressionValue::ObjectValue(child)
 		});
 	}
-	// Replace the hardcoded "44100Hz" option on MenuChoice_SampleRate when the active audio
-	// device opened at a different rate (e.g. 48000 Hz on CoreAudio).
-	if (child->Class && child->Class->Name == "MenuChoice_SampleRate" && engine && engine->audiodev)
+	// Replace the hardcoded "44100Hz" option on MenuChoice_SampleRate (and mod subclasses
+	// like Revision's RevMenuChoice_SampleRate) when the active audio device opened at a
+	// different rate (e.g. 48000 Hz on CoreAudio).
+	if (child->IsA("MenuChoice_SampleRate") && engine && engine->audiodev)
 	{
 		int freq = engine->audiodev->GetDevice() ? engine->audiodev->GetDevice()->GetFrequency() : 0;
 		if (freq <= 0)
