@@ -64,6 +64,7 @@ public:
 	// (bugs.md AUD.17).
 	virtual int GetMusicOrder() = 0;
 	virtual bool SetMusicOrder(int order, float volume) = 0;
+	virtual double GetMusicPositionSeconds() { return 0.0; }
 	// The reverb every mixed sound plays through; nullptr turns it off.
 	virtual void SetReverb(const ReverbSettings* settings) = 0;
 	virtual void Update() = 0;

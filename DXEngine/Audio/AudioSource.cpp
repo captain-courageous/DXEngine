@@ -375,6 +375,204 @@ public:
 	int pcm_samples = 0;
 };
 
+/// Seekable two-part Ogg Vorbis stream (optional one-shot intro followed by looped track).
+class OggPlaylistAudioSource : public AudioSource
+{
+public:
+	OggPlaylistAudioSource(Array<uint8_t> introInput, Array<uint8_t> loopInput, double startSeconds)
+	{
+		bIsLooped = !loopInput.empty();
+		if (!introInput.empty())
+			intro.Open(std::move(introInput));
+		if (!loopInput.empty())
+			loop.Open(std::move(loopInput));
+		if (!intro.handle && !loop.handle)
+			Exception::Throw("OggPlaylistAudioSource: no valid intro or loop audio");
+
+		if (intro.handle)
+		{
+			double introDuration = intro.DurationSeconds();
+			if (startSeconds <= 0.0)
+			{
+				inLoop = false;
+			}
+			else if (startSeconds < introDuration || !loop.handle)
+			{
+				inLoop = false;
+				uint64_t target = (uint64_t)(startSeconds * intro.info.sample_rate);
+				if (intro.totalSamples > 0)
+					target = std::min(target, intro.totalSamples - 1);
+				stb_vorbis_seek(intro.handle, (unsigned int)target);
+				intro.samplePos = target;
+			}
+			else
+			{
+				inLoop = true;
+				introSeconds = introDuration;
+				SeekTrackSeconds(loop, startSeconds - introDuration);
+			}
+		}
+		else
+		{
+			inLoop = true;
+			SeekTrackSeconds(loop, startSeconds);
+		}
+		UpdatePlaybackSeconds();
+	}
+
+	int GetFrequency() override
+	{
+		return (!inLoop && intro.handle) ? intro.info.sample_rate : (loop.handle ? loop.info.sample_rate : intro.info.sample_rate);
+	}
+
+	int GetChannels() override
+	{
+		return (!inLoop && intro.handle) ? intro.info.channels : (loop.handle ? loop.info.channels : intro.info.channels);
+	}
+
+	int GetSamples() override
+	{
+		return int(loop.handle ? loop.totalSamples : intro.totalSamples);
+	}
+
+	void SeekToSample(uint64_t pos) override
+	{
+		Track& active = (!inLoop && intro.handle) ? intro : loop;
+		if (!active.handle)
+			return;
+		unsigned int clamped = active.totalSamples > 0 ? (unsigned int)std::min(pos, active.totalSamples - 1) : 0u;
+		stb_vorbis_seek(active.handle, clamped);
+		active.samplePos = clamped;
+		UpdatePlaybackSeconds();
+	}
+
+	double GetPlaybackSeconds() override
+	{
+		return playbackSeconds;
+	}
+
+	size_t ReadSamples(float* output, size_t requestedsamples) override
+	{
+		int channels = GetChannels();
+		if (channels <= 0)
+			return 0;
+
+		size_t framesRequested = requestedsamples / (size_t)channels;
+		size_t framesRead = 0;
+
+		while (framesRead < framesRequested)
+		{
+			Track* active = (!inLoop && intro.handle) ? &intro : (loop.handle ? &loop : nullptr);
+			if (!active || !active->handle)
+				break;
+
+			int got = stb_vorbis_get_samples_float_interleaved(
+				active->handle,
+				channels,
+				output + framesRead * (size_t)channels,
+				int((framesRequested - framesRead) * (size_t)channels));
+
+			if (got > 0)
+			{
+				framesRead += (size_t)got;
+				active->samplePos += (uint64_t)got;
+				continue;
+			}
+
+			if (!inLoop && active == &intro)
+			{
+				introSeconds = intro.DurationSeconds();
+				if (loop.handle)
+				{
+					inLoop = true;
+					stb_vorbis_seek_start(loop.handle);
+					loop.samplePos = 0;
+					if (framesRead > 0 && (loop.info.channels != intro.info.channels || loop.info.sample_rate != intro.info.sample_rate))
+						break;
+					continue;
+				}
+				break;
+			}
+
+			// Loop ended: rewind once and stop if the file yields 0 frames at start.
+			stb_vorbis_seek_start(active->handle);
+			active->samplePos = 0;
+			int afterWrap = stb_vorbis_get_samples_float_interleaved(
+				active->handle,
+				channels,
+				output + framesRead * (size_t)channels,
+				int((framesRequested - framesRead) * (size_t)channels));
+			if (afterWrap <= 0)
+				break;
+			framesRead += (size_t)afterWrap;
+			active->samplePos += (uint64_t)afterWrap;
+		}
+
+		UpdatePlaybackSeconds();
+		return framesRead * (size_t)channels;
+	}
+
+private:
+	struct Track
+	{
+		Array<uint8_t> data;
+		stb_vorbis* handle = nullptr;
+		stb_vorbis_info info = {};
+		uint64_t totalSamples = 0;
+		uint64_t samplePos = 0;
+
+		Track() = default;
+		Track(const Track&) = delete;
+		Track& operator=(const Track&) = delete;
+		~Track()
+		{
+			if (handle)
+				stb_vorbis_close(handle);
+		}
+
+		void Open(Array<uint8_t> bytes)
+		{
+			data = std::move(bytes);
+			int error = 0;
+			handle = stb_vorbis_open_memory(data.data(), int(data.size()), &error, nullptr);
+			if (!handle)
+				Exception::Throw("Unable to open ogg stream (error " + std::to_string(error) + ")");
+			info = stb_vorbis_get_info(handle);
+			totalSamples = stb_vorbis_stream_length_in_samples(handle);
+		}
+
+		double DurationSeconds() const
+		{
+			return info.sample_rate > 0 ? double(totalSamples) / double(info.sample_rate) : 0.0;
+		}
+	};
+
+	static void SeekTrackSeconds(Track& track, double seconds)
+	{
+		if (!track.handle || seconds <= 0.0 || track.info.sample_rate <= 0)
+			return;
+		uint64_t target = (uint64_t)(seconds * track.info.sample_rate);
+		if (track.totalSamples > 0)
+			target %= track.totalSamples;
+		stb_vorbis_seek(track.handle, (unsigned int)target);
+		track.samplePos = target;
+	}
+
+	void UpdatePlaybackSeconds()
+	{
+		if (!inLoop && intro.handle && intro.info.sample_rate > 0)
+			playbackSeconds = double(intro.samplePos) / double(intro.info.sample_rate);
+		else if (loop.handle && loop.info.sample_rate > 0)
+			playbackSeconds = introSeconds + double(loop.samplePos) / double(loop.info.sample_rate);
+	}
+
+	Track intro;
+	Track loop;
+	bool inLoop = false;
+	double introSeconds = 0.0;
+	double playbackSeconds = 0.0;
+};
+
 class OpenMPTAudioSource : public AudioSource
 {
 public:
@@ -529,6 +727,11 @@ std::unique_ptr<AudioSource> AudioSource::CreateWav(Array<uint8_t> filedata)
 std::unique_ptr<AudioSource> AudioSource::CreateOgg(Array<uint8_t> filedata, bool loop)
 {
 	return std::make_unique<OggAudioSource>(std::move(filedata), loop);
+}
+
+std::unique_ptr<AudioSource> AudioSource::CreateOggStream(Array<uint8_t> introData, Array<uint8_t> loopData, double startSeconds)
+{
+	return std::make_unique<OggPlaylistAudioSource>(std::move(introData), std::move(loopData), startSeconds);
 }
 
 std::unique_ptr<AudioSource> AudioSource::CreateMod(Array<uint8_t> filedata, bool loop, int subsong)

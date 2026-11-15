@@ -256,6 +256,9 @@
 #include "Native/NConEvent.h"
 #include "Native/NConEventRandomLabel.h"
 #include "Native/NConversation.h"
+#include "Native/NConversationList.h"
+#include "Native/NDXOgg.h"
+#include "Native/NGamePlatform.h"
 #include "Native/NDeusExTextParser.h"
 #include "Native/NEditWindow.h"
 #include "Native/NExtensionObject.h"
@@ -281,6 +284,13 @@ PackageManager::PackageManager(const GameLaunchInfo& launchInfo) : launchInfo(la
 {
 	gameRootFolderPath = fs::path(launchInfo.gameRootFolder);
 	gameSystemFolderPath = Directory::resolveCase(gameRootFolderPath / "System");
+	configSystemFolderPath = gameSystemFolderPath;
+	if (!launchInfo.systemIniPath.empty())
+	{
+		fs::path iniDir = fs::path(launchInfo.systemIniPath).parent_path();
+		if (StrTools::equals_ignore_case(iniDir.filename().string(), "System"))
+			configSystemFolderPath = Directory::resolveCase(iniDir);
+	}
 
 	RegisterNativeClasses();
 	CreateTransientPackage();
@@ -756,6 +766,27 @@ void PackageManager::ScanFolder(const std::string& packagedir, const std::string
 	}
 }
 
+fs::path PackageManager::ResolveOggFile(const std::string& filename)
+{
+	if (filename.empty())
+		return {};
+	std::string oggSetting = GetIniValue("System", "Core.System", "OggPath");
+	if (oggSetting.empty())
+		oggSetting = "../Music";
+	fs::path oggRel = convert_path_separators(oggSetting);
+	fs::path oggDir = oggRel.is_absolute()
+		? Directory::resolveCase(oggRel.lexically_normal())
+		: Directory::resolveCase((configSystemFolderPath / oggRel).lexically_normal());
+	std::error_code ec;
+	fs::path candidate = Directory::resolveCase(oggDir / convert_path_separators(filename));
+	if (fs::is_regular_file(candidate, ec))
+		return candidate;
+	fs::path fallback = Directory::resolveCase(gameRootFolderPath / "Music" / convert_path_separators(filename));
+	if (fs::is_regular_file(fallback, ec))
+		return fallback;
+	return {};
+}
+
 void PackageManager::ScanPaths()
 {
 	Array<std::string> paths;
@@ -763,10 +794,10 @@ void PackageManager::ScanPaths()
 
 	// Handle SavePath and CachePath
 	const auto savePath = convert_path_separators(GetIniValue("System", "Core.System", "SavePath"));
-	gameSaveFolderPath = Directory::resolveCase((gameSystemFolderPath / savePath).lexically_normal());
+	gameSaveFolderPath = Directory::resolveCase((configSystemFolderPath / savePath).lexically_normal());
 
 	const auto cachePath = convert_path_separators(GetIniValue("System", "Core.System", "CachePath"));
-	gameCacheFolderPath = Directory::resolveCase((gameSystemFolderPath / cachePath).lexically_normal());
+	gameCacheFolderPath = Directory::resolveCase((configSystemFolderPath / cachePath).lexically_normal());
 
 	for (auto& currentPathStr: paths)
 	{
@@ -776,7 +807,7 @@ void PackageManager::ScanPaths()
 		auto filename = currentPath.filename();
 
 		// Calculate the final, absolute path
-		auto finalPath = Directory::resolveCase((gameSystemFolderPath / currentPath).lexically_normal().parent_path());
+		auto finalPath = Directory::resolveCase((configSystemFolderPath / currentPath).lexically_normal().parent_path());
 
 		// Add map folders in a separate list, so ScanForMaps() can use them
 		// A map folder's pattern in any case, as the folders' extensions are
@@ -978,9 +1009,9 @@ std::unique_ptr<IniFile> PackageManager::GetSystemIniFile()
 
 std::unique_ptr<IniFile>& PackageManager::LoadIniFile(NameString iniName)
 {
-	if (iniName == "user")
+	if (iniName == "user" || (!launchInfo.userIniPath.empty() && NameString(fs::path(launchInfo.userIniPath).stem().string()) == iniName))
 		return LoadUserIniFile();
-	if (iniName == "System")
+	if (iniName == "System" || (!launchInfo.systemIniPath.empty() && NameString(fs::path(launchInfo.systemIniPath).stem().string()) == iniName))
 		return LoadSystemIniFile();
 	
 	auto& ini = iniFiles[iniName];
@@ -989,12 +1020,18 @@ std::unique_ptr<IniFile>& PackageManager::LoadIniFile(NameString iniName)
 		// A class's config file not written yet is empty, as the original's
 		// is, until its SaveConfig writes it (a mod's, as DXMTL.ini). With
 		// --userdir it lives there: read from there first, else from the
-		// game's System folder, and written there.
+		// active mod/game System folder, and written there.
 		// Found in any case, as Windows' file system finds it: the config
 		// name is spelt as it was first made, which the file may not be
-		const auto iniFilePath = Directory::resolveCase(gameSystemFolderPath / (iniName.ToString() + ".ini"));
-		const auto savePath = Directory::hasEngineUserDir() ? Directory::resolveCase(Directory::engineUserDir() / (iniName.ToString() + ".ini")) : iniFilePath;
+		auto iniFilePath = Directory::resolveCase(configSystemFolderPath / (iniName.ToString() + ".ini"));
 		std::error_code ec;
+		if (configSystemFolderPath != gameSystemFolderPath && !fs::exists(iniFilePath, ec))
+		{
+			auto fallbackPath = Directory::resolveCase(gameSystemFolderPath / (iniName.ToString() + ".ini"));
+			if (fs::exists(fallbackPath, ec))
+				iniFilePath = fallbackPath;
+		}
+		const auto savePath = Directory::hasEngineUserDir() ? Directory::resolveCase(Directory::engineUserDir() / (iniName.ToString() + ".ini")) : iniFilePath;
 		if (fs::exists(savePath, ec))
 		{
 			ini = std::make_unique<IniFile>(savePath.string());
@@ -1165,6 +1202,27 @@ void PackageManager::FlushIniFiles()
 	}
 }
 
+static std::string ResolveDefaultIniPath(const fs::path& configDir, const fs::path& gameDir, const std::string& customIniPath, bool isUser)
+{
+	std::error_code ec;
+	auto tryPath = [&](const fs::path& p) -> std::string {
+		fs::path resolved = Directory::resolveCase(p);
+		return fs::is_regular_file(resolved, ec) ? resolved.string() : std::string();
+	};
+	if (!customIniPath.empty())
+	{
+		std::string stem = fs::path(customIniPath).stem().string();
+		if (isUser && stem.size() > 4 && StrTools::equals_ignore_case(stem.substr(stem.size() - 4), "User"))
+			stem.resize(stem.size() - 4);
+		if (auto hit = tryPath(configDir / (stem + (isUser ? "DefUser.ini" : "Default.ini"))); !hit.empty())
+			return hit;
+	}
+	const char* fallback = isUser ? "DefUser.ini" : "Default.ini";
+	if (auto hit = tryPath(configDir / fallback); !hit.empty())
+		return hit;
+	return (gameDir / fallback).string();
+}
+
 void PackageManager::LoadEngineIniFiles()
 {
 	// Load DXE-[GameName].ini and DXE-User.ini from the appropriate places
@@ -1182,8 +1240,11 @@ void PackageManager::LoadEngineIniFiles()
 			systemIniFileName = "Default.ini"; // use the default ini as a last resort
 	}
 
+	const std::string resolvedDefaultIni = ResolveDefaultIniPath(configSystemFolderPath, gameSystemFolderPath, launchInfo.systemIniPath, false);
+	const std::string resolvedDefaultUserIni = ResolveDefaultIniPath(configSystemFolderPath, gameSystemFolderPath, launchInfo.userIniPath, true);
+
 	// Also load Default.ini, so that we can reset values.
-	defaultIniFile = std::make_unique<IniFile>((gameSystemFolderPath / "Default.ini").string());
+	defaultIniFile = std::make_unique<IniFile>(resolvedDefaultIni);
 
 	// --ini and --userini name the files outright, read and written back,
 	// as the original's INI= and USERINI= do. The file named is the engine's
@@ -1201,7 +1262,7 @@ void PackageManager::LoadEngineIniFiles()
 		}
 		else
 		{
-			iniFiles[systemIniName] = std::make_unique<IniFile>((gameSystemFolderPath / "Default.ini").string());
+			iniFiles[systemIniName] = std::make_unique<IniFile>(resolvedDefaultIni);
 			iniFiles[systemIniName]->SetPath(launchInfo.systemIniPath);
 		}
 		missing_dxe_system_ini = iniFiles[systemIniName]->GetKeys("Engine.DXEngineAudioDevice").empty();
@@ -1224,14 +1285,14 @@ void PackageManager::LoadEngineIniFiles()
 	}
 	else if (!launchInfo.userIniPath.empty())
 	{
-		iniFiles["User"] = std::make_unique<IniFile>((gameSystemFolderPath / "DefUser.ini").string());
+		iniFiles["User"] = std::make_unique<IniFile>(resolvedDefaultUserIni);
 		iniFiles["User"]->SetPath(launchInfo.userIniPath);
 	}
 	else
 	{
 		iniFiles["User"] = std::make_unique<IniFile>((gameSystemFolderPath / userIniName).string());
 	}
-	defaultUserFile = std::make_unique<IniFile>((gameSystemFolderPath / "DefUser.ini").string());
+	defaultUserFile = std::make_unique<IniFile>(resolvedDefaultUserIni);
 }
 
 void PackageManager::LoadFileExtensions()
@@ -1265,10 +1326,12 @@ void PackageManager::LoadIntFiles()
 	{
 		// The folder as the disk spells it, as the package folders are found:
 		// a path in another case gave its packages but none of its text
-		fs::path folder = Directory::resolveCase((gameSystemFolderPath / convert_path_separators(path)).lexically_normal().parent_path());
+		fs::path folder = Directory::resolveCase((configSystemFolderPath / convert_path_separators(path)).lexically_normal().parent_path());
 		if (std::find(intFolders.begin(), intFolders.end(), folder) == intFolders.end())
 			intFolders.push_back(folder);
 	}
+	if (std::find(intFolders.begin(), intFolders.end(), configSystemFolderPath.lexically_normal()) == intFolders.end())
+		intFolders.push_back(configSystemFolderPath.lexically_normal());
 	if (std::find(intFolders.begin(), intFolders.end(), gameSystemFolderPath.lexically_normal()) == intFolders.end())
 		intFolders.push_back(gameSystemFolderPath.lexically_normal());
 
@@ -1463,6 +1526,9 @@ void PackageManager::RegisterFunctions()
 	NConEvent::RegisterFunctions();
 	NConEventRandomLabel::RegisterFunctions();
 	NConversation::RegisterFunctions();
+	NConversationList::RegisterFunctions();
+	NDXOgg::RegisterFunctions();
+	NGamePlatform::RegisterFunctions();
 	NDeusExTextParser::RegisterFunctions();
 	NEditWindow::RegisterFunctions();
 	NExtensionObject::RegisterFunctions();

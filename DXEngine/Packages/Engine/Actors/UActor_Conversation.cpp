@@ -41,26 +41,32 @@ void UActor::DeusExConBindEvents()
 	char listName[32];
 	snprintf(listName, sizeof(listName), "ConList_Mission%02d", info->MissionNumber());
 	auto mission = UObject::Cast<UConversationList>(engine->packages->GetPackage(pkgName)->GetUObject("ConversationList", listName));
-	if (!mission)
+	if (mission)
+		mission->BindConversations(this);
+}
+
+void UConversationList::BindConversations(UActor* bindActor)
+{
+	if (!bindActor)
 		return;
 
 	// PurgeBoundConversations (ConSys.dll 0x10010cf0): the old list's
 	// conversations lose this owner, and its items are deleted at once,
 	// gone to the script as CriticalDelete's are.
-	for (UConListItem* item = UObject::Cast<UConListItem>(ConListItems()); item; item = item->Next())
+	for (UConListItem* item = UObject::Cast<UConListItem>(bindActor->ConListItems()); item; item = item->Next())
 	{
 		if (item->con())
 			item->con()->ownerRefCount()--;
 		item->Flags |= ObjectFlags::EliminateObject;
 	}
-	ConListItems() = nullptr;
+	bindActor->ConListItems() = nullptr;
 
 	UClass* clsConListItem = engine->packages->FindClass("ConSys.ConListItem");
-	Package* listPackage = mission->package;
-	ScriptString bindName = BindName();
-	ScriptString barkBindName = BarkBindName();
+	Package* listPackage = package;
+	ScriptString bindName = bindActor->BindName();
+	ScriptString barkBindName = bindActor->BarkBindName();
 
-	for (UConItem* item = mission->conversations(); item; item = item->Next())
+	for (UConItem* item = conversations(); item; item = item->Next())
 	{
 		auto conversation = UObject::Cast<UConversation>(item->ConObject());
 		if (!conversation)
@@ -86,8 +92,8 @@ void UActor::DeusExConBindEvents()
 		// ConListItemN and public, as the original's (0x10010b70).
 		UConListItem* newItem = UObject::Cast<UConListItem>(listPackage->NewObject(listPackage->MakeUniqueObjectName(clsConListItem), clsConListItem, ObjectFlags::Public, true));
 		newItem->con() = conversation;
-		newItem->Next() = UObject::Cast<UConListItem>(ConListItems());
-		ConListItems() = newItem;
+		newItem->Next() = UObject::Cast<UConListItem>(bindActor->ConListItems());
+		bindActor->ConListItems() = newItem;
 		conversation->ownerRefCount()++;
 	}
 }

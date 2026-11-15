@@ -10,6 +10,7 @@ public:
 	static std::unique_ptr<AudioSource> CreateMp3(Array<uint8_t> filedata);
 	static std::unique_ptr<AudioSource> CreateWav(Array<uint8_t> filedata);
 	static std::unique_ptr<AudioSource> CreateOgg(Array<uint8_t> filedata, bool loop = false);
+	static std::unique_ptr<AudioSource> CreateOggStream(Array<uint8_t> introData, Array<uint8_t> loopData, double startSeconds = 0.0);
 	static std::unique_ptr<AudioSource> CreateMod(Array<uint8_t> filedata, bool loop = true, int subsong = 0);
 
 	AudioSource() = default;
@@ -33,6 +34,9 @@ public:
 	// Tracker music's tempo, 5/2 of its ticks a second; 0 for sources
 	// without one.
 	virtual double GetTempo() { return 0.0; }
+
+	// Playback position in seconds for streamable sources (e.g. DXOgg).
+	virtual double GetPlaybackSeconds() { return 0.0; }
 
 	// The output mono, without UseStereo (bugs.md AUD.14): a source that
 	// pans its own voices reads both channels as their mono mix, each voice

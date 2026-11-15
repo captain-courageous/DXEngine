@@ -63,9 +63,22 @@ GameLaunchInfo GameFolderSelection::GetLaunchInfo(int selectedGame)
 		return {};
 
 	GameLaunchInfo info = Games[selectedGame];
+	std::error_code ec;
 	info.url = commandline->GetArg("-u", "--url", info.url);
 	info.systemIniPath = commandline->GetArg("", "--ini", info.systemIniPath);
+	if (!info.systemIniPath.empty() && fs::path(info.systemIniPath).is_relative() && !fs::exists(info.systemIniPath, ec))
+	{
+		std::string resolved = OriginalIniPath(info, info.systemIniPath);
+		if (fs::exists(resolved, ec))
+			info.systemIniPath = resolved;
+	}
 	info.userIniPath = commandline->GetArg("", "--userini", info.userIniPath);
+	if (!info.userIniPath.empty() && fs::path(info.userIniPath).is_relative() && !fs::exists(info.userIniPath, ec))
+	{
+		std::string resolved = OriginalIniPath(info, info.userIniPath);
+		if (fs::exists(resolved, ec))
+			info.userIniPath = resolved;
+	}
 	info.dedicatedServer = commandline->HasArg("", "--server") || info.dedicatedServer;
 	info.lanPlay = commandline->HasArg("", "--lanplay") || info.lanPlay;
 	info.timelinePath = commandline->GetArg("", "--timeline", info.timelinePath);

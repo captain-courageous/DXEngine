@@ -89,7 +89,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 
 #ifdef __APPLE__
-std::string PrepareMacGameBundle();
+std::string PrepareMacGameBundle(std::vector<std::string>* extraArgs);
 int RunMacGame(const std::function<int()>& runGame);
 #endif
 
@@ -100,9 +100,12 @@ int main(int argc, char** argv)
 		Array<std::string> args;
 #ifdef __APPLE__
 		if (argc == 1) {
-			auto gamePath = PrepareMacGameBundle();
+			std::vector<std::string> bundleArgs;
+			auto gamePath = PrepareMacGameBundle(&bundleArgs);
 			if (gamePath.empty()) return 0; // Folder picker cancelled.
 			args.push_back("--direct"); args.push_back(gamePath);
+			for (const auto& extra : bundleArgs)
+				args.push_back(extra);
 		}
 #endif
 		for (int i = 1; i < argc; i++)

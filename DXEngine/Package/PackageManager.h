@@ -36,8 +36,11 @@ public:
 
 	fs::path GetRootFolderPath() const { return gameRootFolderPath; }
 	fs::path GetSystemFolderPath() const { return gameSystemFolderPath; }
+	fs::path GetConfigSystemFolderPath() const { return configSystemFolderPath; }
 	fs::path GetSaveFolderPath() const { return gameSaveFolderPath; }
 	fs::path GetCacheFolderPath() const { return gameCacheFolderPath; }
+	/// Resolves a DXOgg audio filename against [Core.System] OggPath.
+	fs::path ResolveOggFile(const std::string& filename);
 
 	Package* GetPackage(const NameString& name);
 	// Whether a package of that name is on the paths, and whether it is a map.
@@ -231,6 +234,7 @@ private:
 	// So that we don't have to build fs::path()s all over the place
 	fs::path gameRootFolderPath;
 	fs::path gameSystemFolderPath;
+	fs::path configSystemFolderPath;
 	fs::path gameSaveFolderPath;
 	fs::path gameCacheFolderPath;
 

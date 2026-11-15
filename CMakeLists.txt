@@ -227,6 +227,12 @@ set(DXCOMMON_SOURCES
 	DXEngine/Native/NConEventRandomLabel.h
 	DXEngine/Native/NConversation.cpp
 	DXEngine/Native/NConversation.h
+	DXEngine/Native/NConversationList.cpp
+	DXEngine/Native/NConversationList.h
+	DXEngine/Native/NDXOgg.cpp
+	DXEngine/Native/NDXOgg.h
+	DXEngine/Native/NGamePlatform.cpp
+	DXEngine/Native/NGamePlatform.h
 	DXEngine/Native/NDeusExTextParser.cpp
 	DXEngine/Native/NDeusExTextParser.h
 	DXEngine/Native/NEditWindow.cpp

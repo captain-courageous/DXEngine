@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #include <filesystem>
+#include <vector>
 #include <stdexcept>
 #include <functional>
 #include <exception>
@@ -8,7 +9,7 @@
 
 #include "game_install.h"
 
-std::string PrepareMacGameBundle() {
+std::string PrepareMacGameBundle(std::vector<std::string>* extraArgs) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -40,6 +41,10 @@ std::string PrepareMacGameBundle() {
                 assets=ValidateDeusExInstall(assets);
                 PrepareDeusExInstall(assets,game);
                 [NSUserDefaults.standardUserDefaults setObject:[NSString stringWithUTF8String:assets.c_str()] forKey:@"DeusExInstallation"];
+                if (extraArgs && (fs::is_regular_file(assets/"Revision/System/Revision.ini") || fs::is_regular_file(assets/"Revision/System/RevisionDefault.ini"))) {
+                    extraArgs->push_back("--ini=../Revision/System/Revision.ini");
+                    extraArgs->push_back("--userini=../Revision/System/RevisionUser.ini");
+                }
                 fs::current_path(game);
                 int log=open((game/"game.log").c_str(),O_WRONLY|O_CREAT|O_TRUNC,0600);
                 if (log<0) throw std::runtime_error("Cannot open game log");

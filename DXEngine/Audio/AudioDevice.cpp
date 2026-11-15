@@ -181,6 +181,7 @@ public:
 		int sections = source ? source->GetSections() : -1;
 		std::unique_lock lock(musicThreadData.mutex);
 		musicThreadData.sections = sections;
+		musicThreadData.musicPositionSeconds.store(source ? source->GetPlaybackSeconds() : 0.0);
 		musicThreadData.music = std::move(source);
 		musicThreadData.musicUpdate = true;
 		musicThreadData.volume = volume;
@@ -188,6 +189,11 @@ public:
 		musicThreadData.currentOrder.store(-1);
 		lock.unlock();
 		musicThreadData.cv.notify_one();
+	}
+
+	double GetMusicPositionSeconds() override
+	{
+		return musicThreadData.musicPositionSeconds.load();
 	}
 
 	int GetMusicOrder() override
@@ -473,6 +479,7 @@ public:
 						// chunks before
 						float* chunk = musicQueue.GetNextFree();
 						size_t got = currentMusic->ReadSamples(chunk, musicBufferSize);
+						musicThreadData.musicPositionSeconds.store(currentMusic->GetPlaybackSeconds());
 						if (got < (size_t)musicBufferSize)
 							std::fill(chunk + got, chunk + musicBufferSize, 0.0f);
 						// Mono without UseStereo, the music too, as Galaxy's whole
@@ -515,6 +522,7 @@ public:
 					currentMusic.reset();
 					mixer->SetMusicTempo(0.0);
 					musicThreadData.currentOrder.store(-1);
+					musicThreadData.musicPositionSeconds.store(0.0);
 					std::unique_lock failedLock(musicThreadData.mutex);
 					musicThreadData.failure = e.what();
 				}
@@ -771,6 +779,7 @@ public:
 		int jumpOrder = -1;                     // an order to jump the playing song to
 		int sections = -1;                      // the sections the song set takes, -1 any (AudioSource::GetSections)
 		std::atomic<int> currentOrder{ -1 };    // the order playing: a jump's count at once, else the music thread's
+		std::atomic<double> musicPositionSeconds{ 0.0 };
 		int generation = 0;                     // counts the songs set, so the thread's order is its own song's
 		float volume = 0.0f;                    // the music's gain, for the thread to set on the source
 		std::string failure;                    // why the song stopped, for the main thread to log

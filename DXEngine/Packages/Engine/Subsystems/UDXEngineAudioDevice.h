@@ -98,6 +98,12 @@ public:
 
 	AudioDevice* GetDevice() { return m_Device.get(); }
 
+	void SetDXOgg(const std::string& introFile, const std::string& loopFile, int playPos, uint8_t transition, float volume);
+	void StopDXOgg();
+	float GetDXOggPosition() const;
+	const std::string& GetNextDXOggIntro() const { return m_NextDXOggIntro; }
+	const std::string& GetNextDXOggLoop() const { return m_NextDXOggLoop; }
+
 	// The sounds playing and the song: kept while they play. A playing
 	// sound's actor may be made None, and it plays on where it was; an
 	// ambient sound's is kept.
@@ -115,6 +121,8 @@ private:
 
 	void UpdateLipSync(PlayingSound& Playing, int channel);
 	void UpdateMusic(float timeStep);
+	void UpdateDXOgg(float timeStep);
+	void StartPendingDXOgg();
 	void UpdateReverb();
 	void StopSound(size_t index);
 
@@ -142,4 +150,15 @@ private:
 	// The reverb zone last set on the device, so it is set again only when it
 	// changes (galaxy-dll.md, Reverb).
 	UZoneInfo* m_ReverbZone = nullptr;
+
+	// DXOgg Ogg Vorbis playback state, kept independent of level Song=None clears.
+	bool m_DXOggActive = false;
+	bool m_DXOggPending = false;
+	uint8_t m_DXOggTransition = 0;
+	float m_DXOggFade = 1.0f;
+	float m_DXOggVolume = 1.0f;
+	std::string m_NextDXOggIntro;
+	std::string m_NextDXOggLoop;
+	int m_NextDXOggPlayPos = 0;
+	float m_NextDXOggVolume = 1.0f;
 };

@@ -57,19 +57,39 @@ inline void PrepareDeusExInstall(const fs::path& selected, const fs::path& game)
         }
         fs::create_symlink(source, target);
     };
-    for (const char* folder : {"Maps", "Music", "Sounds", "Textures"}) link(assets/folder, game/folder);
-    // Remove only links left by the previous installation; preserve settings and saves.
-    for (const auto& entry : fs::directory_iterator(game/"System"))
-        if (entry.is_symlink() && !fs::exists(assets/"System"/entry.path().filename())) fs::remove(entry.path());
-    for (const auto& entry : fs::directory_iterator(assets/"System")) {
-        if (!entry.is_regular_file()) continue;
-        auto target = game/"System"/entry.path().filename();
-        if (entry.path().extension() == ".ini") {
-            if (fs::is_symlink(target)) throw std::runtime_error("Settings must be local files: " + target.string());
-            if (!fs::exists(target)) fs::copy_file(entry.path(), target);
-        } else if (entry.path().extension() == ".u" || entry.path().extension() == ".int" || entry.path().filename() == "DeusEx.exe") {
-            link(entry.path(), target);
+    auto syncSystem = [&](const fs::path& srcSys, const fs::path& dstSys, bool includeExe) {
+        for (const auto& entry : fs::directory_iterator(dstSys))
+            if (entry.is_symlink() && !fs::exists(srcSys / entry.path().filename())) fs::remove(entry.path());
+        for (const auto& entry : fs::directory_iterator(srcSys)) {
+            if (!entry.is_regular_file()) continue;
+            auto target = dstSys / entry.path().filename();
+            auto ext = entry.path().extension();
+            if (ext == ".ini") {
+                if (fs::is_symlink(target)) throw std::runtime_error("Settings must be local files: " + target.string());
+                if (!fs::exists(target)) fs::copy_file(entry.path(), target);
+            } else if (ext == ".u" || ext == ".int" || (includeExe && entry.path().filename() == "DeusEx.exe")) {
+                link(entry.path(), target);
+            }
         }
+    };
+    for (const char* folder : {"Maps", "Music", "Sounds", "Textures"}) link(assets/folder, game/folder);
+    syncSystem(assets/"System", game/"System", true);
+    if (fs::is_directory(assets/"Revision/System")) {
+        for (const char* folder : {"Revision/System", "Revision/Save", "Revision/Cache"}) {
+            if (fs::is_symlink(game/folder)) throw std::runtime_error("Expected a local settings folder: " + (game/folder).string());
+            fs::create_directories(game/folder);
+        }
+        for (const auto& entry : fs::directory_iterator(assets/"Revision")) {
+            if (!entry.is_directory()) continue;
+            auto name = entry.path().filename().string();
+            if (name == "System" || name == "Save" || name == "Cache") continue;
+            link(entry.path(), game/"Revision"/name);
+        }
+        syncSystem(assets/"Revision/System", game/"Revision/System", false);
+        if (!fs::exists(game/"Revision/System/Revision.ini") && fs::is_regular_file(game/"Revision/System/RevisionDefault.ini"))
+            fs::copy_file(game/"Revision/System/RevisionDefault.ini", game/"Revision/System/Revision.ini");
+        if (!fs::exists(game/"Revision/System/RevisionUser.ini") && fs::is_regular_file(game/"Revision/System/RevisionDefUser.ini"))
+            fs::copy_file(game/"Revision/System/RevisionDefUser.ini", game/"Revision/System/RevisionUser.ini");
     }
     for (const auto& [file, clientSection] : {
         std::pair{"System/SE-DeusEx.ini", "Engine.SurrealClient"},

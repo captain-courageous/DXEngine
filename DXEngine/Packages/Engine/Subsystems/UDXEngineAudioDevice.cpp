@@ -1,6 +1,7 @@
 
 #include "Precomp.h"
 #include "UDXEngineAudioDevice.h"
+#include "Utils/File.h"
 #include "Engine.h"
 #include "Package/PackageManager.h"
 #include "Package/IniProperty.h"
@@ -280,10 +281,14 @@ void UDXEngineAudioDevice::Update()
 	StartAmbience();
 	UpdateAmbience();
 	UpdateSounds(timeStep);
+	UpdateDXOgg(timeStep);
 	UpdateMusic(timeStep);
 	UpdateReverb();
 
-	m_Device->SetMusicVolume(GalaxyMusicGain(MusicVolume, m_MusicFade));
+	float musicGain = m_DXOggActive
+		? (UseDigitalMusic ? GalaxyMusicGain(MusicVolume, m_DXOggFade) * m_DXOggVolume : 0.0f)
+		: GalaxyMusicGain(MusicVolume, m_MusicFade);
+	m_Device->SetMusicVolume(musicGain);
 	// Galaxy's sample volume is the louder of the two sliders, squared in its
 	// mixer; each sound's own share of the sliders is its voice's
 	// (GalaxyVoice, galaxy-dll.md, Volume).
@@ -657,12 +662,131 @@ static std::unique_ptr<AudioSource> CreateMusicSource(UMusic* song, int order)
 	return source;
 }
 
+static bool AdvanceMusicFade(uint8_t transition, float timeStep, int latency, float& fade)
+{
+	switch (transition)
+	{
+	case MTRAN_Fade:
+		fade = (float)(fade - (double)timeStep);
+		return latency * -0.002 > fade;
+	case MTRAN_SlowFade:
+		fade = (float)(fade - timeStep * 0.2);
+		return latency * -0.0004 > fade;
+	case MTRAN_FastFade:
+		fade = (float)(fade - timeStep * 3.0);
+		return latency * -0.006 > fade;
+	default:
+		return true;
+	}
+}
+
+void UDXEngineAudioDevice::SetDXOgg(const std::string& introFile, const std::string& loopFile, int playPos, uint8_t transition, float volume)
+{
+	if (introFile.empty() && loopFile.empty())
+	{
+		StopDXOgg();
+		return;
+	}
+
+	m_NextDXOggIntro = introFile;
+	m_NextDXOggLoop = loopFile;
+	m_NextDXOggPlayPos = std::max(playPos, 0);
+	m_NextDXOggVolume = std::clamp(volume, 0.0f, 1.0f);
+
+	const bool fading = (m_DXOggActive || CurrentSong != nullptr)
+		&& (transition == MTRAN_Fade || transition == MTRAN_FastFade || transition == MTRAN_SlowFade);
+	if (fading)
+	{
+		m_DXOggTransition = transition;
+		m_DXOggPending = true;
+		return;
+	}
+
+	StartPendingDXOgg();
+}
+
+void UDXEngineAudioDevice::StopDXOgg()
+{
+	m_DXOggActive = false;
+	m_DXOggPending = false;
+	m_DXOggTransition = MTRAN_None;
+	m_DXOggFade = 1.0f;
+	m_DXOggVolume = 1.0f;
+	m_NextDXOggIntro.clear();
+	m_NextDXOggLoop.clear();
+	m_NextDXOggPlayPos = 0;
+	m_NextDXOggVolume = 1.0f;
+	if (m_Device)
+		m_Device->PlayMusic({}, 0.0f);
+	CurrentSong = nullptr;
+}
+
+float UDXEngineAudioDevice::GetDXOggPosition() const
+{
+	return (m_DXOggActive && m_Device) ? float(m_Device->GetMusicPositionSeconds()) : 0.0f;
+}
+
+void UDXEngineAudioDevice::StartPendingDXOgg()
+{
+	m_DXOggPending = false;
+	m_DXOggTransition = MTRAN_None;
+	m_DXOggFade = 1.0f;
+
+	if (!m_Device || !engine || !engine->packages)
+		return;
+
+	try
+	{
+		Array<uint8_t> introData;
+		Array<uint8_t> loopData;
+		if (!m_NextDXOggIntro.empty())
+		{
+			fs::path p = engine->packages->ResolveOggFile(m_NextDXOggIntro);
+			if (p.empty())
+				throw std::runtime_error("DXOgg: missing intro file '" + m_NextDXOggIntro + "'");
+			introData = File::read_all_bytes(p.string());
+		}
+		if (!m_NextDXOggLoop.empty())
+		{
+			fs::path p = engine->packages->ResolveOggFile(m_NextDXOggLoop);
+			if (p.empty())
+				throw std::runtime_error("DXOgg: missing loop file '" + m_NextDXOggLoop + "'");
+			loopData = File::read_all_bytes(p.string());
+		}
+
+		auto source = AudioSource::CreateOggStream(std::move(introData), std::move(loopData), double(m_NextDXOggPlayPos));
+		float gain = UseDigitalMusic ? GalaxyMusicGain(MusicVolume, 1.0f) * m_NextDXOggVolume : 0.0f;
+		m_Device->PlayMusic(std::move(source), gain);
+		m_DXOggVolume = m_NextDXOggVolume;
+		m_DXOggActive = true;
+		CurrentSong = nullptr;
+	}
+	catch (const std::exception& e)
+	{
+		LogMessage(e.what());
+		StopDXOgg();
+	}
+}
+
+void UDXEngineAudioDevice::UpdateDXOgg(float timeStep)
+{
+	if (!m_DXOggPending)
+		return;
+	if (AdvanceMusicFade(m_DXOggTransition, timeStep, Latency, m_DXOggFade))
+		StartPendingDXOgg();
+}
+
 void UDXEngineAudioDevice::UpdateMusic(float timeStep)
 {
 	if (!m_Viewport || !m_Viewport->Actor())
 		return;
 
 	auto* player = m_Viewport->Actor();
+	if (m_DXOggActive || m_DXOggPending)
+	{
+		player->Transition() = MTRAN_None;
+		return;
+	}
 
 	if (player->Transition() != MTRAN_None)
 	{
@@ -677,29 +801,8 @@ void UDXEngineAudioDevice::UpdateMusic(float timeStep)
 		// in silence, 80 ms at the game's 40. MTRAN_Instant, MTRAN_Segue and
 		// any other transition change at once, as one with nothing playing
 		// does.
-		if (CurrentSong)
-		{
-			bool done = true;
-			switch (player->Transition())
-			{
-			case MTRAN_Fade:
-				m_MusicFade = (float)(m_MusicFade - (double)timeStep);
-				done = Latency * -0.002 > m_MusicFade;
-				break;
-			case MTRAN_SlowFade:
-				m_MusicFade = (float)(m_MusicFade - timeStep * 0.2);
-				done = Latency * -0.0004 > m_MusicFade;
-				break;
-			case MTRAN_FastFade:
-				m_MusicFade = (float)(m_MusicFade - timeStep * 3.0);
-				done = Latency * -0.006 > m_MusicFade;
-				break;
-			default:
-				break;
-			}
-			if (!done)
-				return;
-		}
+		if (CurrentSong && !AdvanceMusicFade(player->Transition(), timeStep, Latency, m_MusicFade))
+			return;
 
 		// The change: the player's Song at the order SongSection at full
 		// volume -- a different song is loaded, the same one only jumps --
@@ -953,8 +1056,7 @@ void UDXEngineAudioDevice::StopSounds()
 
 	// The song goes with the music: a level of the same song starts it
 	// again, where it would only jump the order of music stopped.
-	m_Device->PlayMusic(nullptr, 0.0f);
-	CurrentSong = nullptr;
+	StopDXOgg();
 	m_Viewport = nullptr;
 }
 
