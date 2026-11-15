@@ -16,6 +16,7 @@
 #include "Render/RenderSubsystem.h"
 #include "Package/PackageManager.h"
 #include "Packages/Core/UClass.h"
+#include "Utils/ScriptString.h"
 #include "Packages/Core/Properties/UFloatProperty.h"
 #include "Packages/Engine/UViewport.h"
 #include "Packages/Engine/Subsystems/UDXEngineAudioDevice.h"
@@ -1261,6 +1262,22 @@ UObject* UWindow::NewChild(UObject* NewClass, std::optional<bool> bShow)
 	ChildAdded(child);
 	for (UWindow* ancestor = this; ancestor; ancestor = ancestor->parentOwner())
 		ancestor->DescendantAdded(child);
+	// Replace the hardcoded "44100Hz" option on MenuChoice_SampleRate when the active audio
+	// device opened at a different rate (e.g. 48000 Hz on CoreAudio).
+	if (child->Class && child->Class->Name == "MenuChoice_SampleRate" && engine && engine->audiodev)
+	{
+		int freq = engine->audiodev->GetDevice() ? engine->audiodev->GetDevice()->GetFrequency() : 0;
+		if (freq <= 0)
+			freq = engine->audiodev->OutputRate.frequency;
+		if (freq > 0 && freq != 11025 && freq != 22050)
+		{
+			if (UProperty* prop = child->GetMemberProperty("enumText"); prop && prop->ArrayDimension > 2)
+			{
+				auto* enumText = static_cast<ScriptString*>(child->GetProperty(prop));
+				enumText[2] = UTF8ToScript(std::to_string(freq) + "Hz");
+			}
+		}
+	}
 	child->InitWindow();
 	// One that destroyed itself in its InitWindow is None to its maker, as
 	// the original's is (its destroy held off while the window is locked,

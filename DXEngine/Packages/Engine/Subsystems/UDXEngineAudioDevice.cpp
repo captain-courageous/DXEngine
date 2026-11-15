@@ -200,6 +200,8 @@ void UDXEngineAudioDevice::InitDevice()
 	try
 	{
 		m_Device = AudioDevice::Create(OutputRate.frequency, 256, 8, 2048, Latency, UseStereo);
+		if (const int actual = m_Device->GetFrequency(); actual > 0)
+			OutputRate.frequency = actual;
 		LogMessage("Audio device initialized");
 	}
 	catch (const std::exception& e)

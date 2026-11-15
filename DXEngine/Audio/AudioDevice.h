@@ -35,6 +35,7 @@ public:
 	virtual void RemoveSound(USound* sound) = 0;
 	virtual bool IsPlaying(int channel) = 0;
 	virtual int GetTotalChannels() = 0;
+	virtual int GetFrequency() const = 0;
 	// A song in place of the one playing, or none, and the music's gain to
 	// play it at: the gain reaches the output only once the old song's
 	// sound is dropped, as Galaxy changes the song and sets its volume in one

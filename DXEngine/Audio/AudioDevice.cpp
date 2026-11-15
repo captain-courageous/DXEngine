@@ -133,6 +133,11 @@ public:
 		return mixer->GetChannels();
 	}
 
+	int GetFrequency() const override
+	{
+		return frequency;
+	}
+
 	void AddSound(USound* sound) override
 	{
 		// The mixer's own 16-bit copy, which a channel keeps while it plays,
@@ -801,6 +806,7 @@ public:
 	void RemoveSound(USound* sound) override {}
 	bool IsPlaying(int channel) override { return false; }
 	int GetTotalChannels() override { return numVoices; }
+	int GetFrequency() const override { return 0; }
 	void PlayMusic(std::unique_ptr<AudioSource> source, float volume) override {}
 	void PlayMixedSound(int channel, USound* sound, int volume, int panning, float pitch) override {}
 	void UpdateMixedSound(int channel, int volume, int panning, float pitch) override {}
