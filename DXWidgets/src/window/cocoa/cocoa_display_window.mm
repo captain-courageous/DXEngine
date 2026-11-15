@@ -1008,13 +1008,49 @@ void CocoaDisplayWindow::SetWindowIcon(const std::vector<std::shared_ptr<Image>>
 {
     if (impl->window && !images.empty())
     {
-    // For simplicity, use the first image as the icon.
-        // A more robust implementation might choose an appropriate size.
+        // Preserve the app bundle's Dock icon when a bundle icon resource exists.
+        if (NSBundle* bundle = [NSBundle mainBundle])
+        {
+            NSString* iconFile = [bundle objectForInfoDictionaryKey:@"CFBundleIconFile"];
+            if ([iconFile isKindOfClass:[NSString class]] && iconFile.length > 0)
+            {
+                NSString* name = [iconFile stringByDeletingPathExtension];
+                NSString* ext = [iconFile pathExtension];
+                if ([bundle pathForResource:name ofType:(ext.length > 0 ? ext : @"icns")] != nil)
+                    return;
+            }
+        }
+
         std::shared_ptr<Image> iconImage = images[0];
+        for (const auto& img : images)
+        {
+            if (img && (!iconImage || img->GetWidth() * img->GetHeight() > iconImage->GetWidth() * iconImage->GetHeight()))
+                iconImage = img;
+        }
+        if (!iconImage || !iconImage->GetData() || iconImage->GetWidth() <= 0 || iconImage->GetHeight() <= 0)
+            return;
+
+        // PEIcon decodes Windows icons as straight B8G8R8A8; convert to premultiplied R8G8B8A8 for CoreGraphics.
+        const int w = iconImage->GetWidth();
+        const int h = iconImage->GetHeight();
+        const uint8_t* src = static_cast<const uint8_t*>(iconImage->GetData());
+        const bool isBGRA = (iconImage->GetFormat() == ImageFormat::B8G8R8A8);
+        std::vector<uint8_t> rgba((size_t)w * h * 4);
+        for (size_t i = 0, count = (size_t)w * h; i < count; i++)
+        {
+            const uint8_t r = src[i * 4 + (isBGRA ? 2 : 0)];
+            const uint8_t g = src[i * 4 + 1];
+            const uint8_t b = src[i * 4 + (isBGRA ? 0 : 2)];
+            const uint8_t a = src[i * 4 + 3];
+            rgba[i * 4 + 0] = (uint8_t)((r * a + 127) / 255);
+            rgba[i * 4 + 1] = (uint8_t)((g * a + 127) / 255);
+            rgba[i * 4 + 2] = (uint8_t)((b * a + 127) / 255);
+            rgba[i * 4 + 3] = a;
+        }
 
         CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
         CGContextRef context = CGBitmapContextCreate(
-            iconImage->GetData(), iconImage->GetWidth(), iconImage->GetHeight(), 8, iconImage->GetWidth() * 4, colorSpace,
+            rgba.data(), w, h, 8, w * 4, colorSpace,
             kCGImageAlphaPremultipliedLast | (CGBitmapInfo)kCGBitmapByteOrder32Big);
 
         if (context)
