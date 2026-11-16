@@ -20,7 +20,8 @@ void UActor::InitBase()
 		{
 			if (levelActor && levelActor->Tag() == attachTag)
 			{
-				levelActor->SetBase(this, false);
+				SetBase(levelActor, false);
+				break;
 			}
 		}
 		return;

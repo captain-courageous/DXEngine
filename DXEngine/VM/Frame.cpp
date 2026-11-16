@@ -21,10 +21,14 @@
 #include "Engine.h"
 #include "Packages/Engine/Actors/UActor.h"
 #include "Package/PackageManager.h"
+#include "Package/IniProperty.h"
+#include "Packages/Extension/Windows/UScaleWindow.h"
 #include "Network/NetDriver.h"
 #include "Network/NetRemote.h"
 #include "Utils/AlignedAlloc.h"
 #include "VM/PrintPrettyExpression.h"
+#include <algorithm>
+#include <cmath>
 
 Array<Frame*> Frame::Callstack;
 std::string Frame::ExceptionText;
@@ -336,8 +340,152 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, CallArguments& a
 	}
 }
 
+static bool TryHandleBrokenMenuReset(UFunction* func, UObject* instance)
+{
+	if (!func || !instance || !func->StructParent || !engine || !engine->packages)
+		return false;
+
+	if (func->Name == "ResetToDefault")
+	{
+		// DeusEx.u copy-pasted LoadSetting() into ResetToDefault() on these Controls and
+		// Game Options toggles (reading the live Player state instead of defaults), so
+		// Restore Defaults is a no-op once saved.
+		struct MenuBoolDefault
+		{
+			const char* className;
+			const char* iniSection;
+			const char* iniKey;
+			const char* fallbackValue;
+			bool enabledIsZero;
+		};
+		static constexpr MenuBoolDefault boolDefaults[] = {
+			{ "MenuChoice_AlwaysRun",        "DeusEx.DeusExPlayer", "bAlwaysRun",        "True",  true  },
+			{ "MenuChoice_ToggleCrouch",     "DeusEx.DeusExPlayer", "bToggleCrouch",     "False", true  },
+			{ "MenuChoice_InvertMouse",      "Engine.PlayerPawn",   "bInvertMouse",      "False", true  },
+			{ "MenuChoice_ObjectNames",      "DeusEx.DeusExPlayer", "bObjectNames",      "True",  true  },
+			{ "MenuChoice_WeaponAutoReload", "DeusEx.DeusExPlayer", "bAutoReload",       "True",  true  },
+			{ "MenuChoice_Crosshairs",       "DeusEx.DeusExPlayer", "bCrosshairVisible", "True",  true  },
+			{ "MenuChoice_Subtitles",        "DeusEx.DeusExPlayer", "bSubtitles",        "True",  false },
+		};
+		for (const auto& entry : boolDefaults)
+		{
+			if (func->StructParent->Name == entry.className)
+			{
+				std::string raw = engine->packages->GetDefUserIniValue(entry.iniSection, entry.iniKey, entry.fallbackValue);
+				bool defaultFlag = IniPropertyConverter<bool>::FromString(raw);
+				int uiVal = entry.enabledIsZero ? (defaultFlag ? 0 : 1) : (defaultFlag ? 1 : 0);
+				CallEvent(instance, "SetValue", { ExpressionValue::IntValue(uiVal) });
+				return true;
+			}
+		}
+
+		if (func->StructParent->Name == "MenuChoice_HeadBob")
+		{
+			std::string raw = engine->packages->GetDefUserIniValue("Engine.PlayerPawn", "Bob", "0.016000");
+			float defaultBob = 0.016f;
+			try { defaultBob = std::stof(raw); } catch (...) {}
+			CallEvent(instance, "SetValue", { ExpressionValue::IntValue(defaultBob == 0.0f ? 1 : 0) });
+			return true;
+		}
+
+		// RenderFix passes tick index 9 ("1") to SetValue(9.0) instead of SetTickPosition(9)
+		// on its 0.1..10 (19-tick) slider, snapping to tick 16 ("8") and resetting sensitivity to 8.
+		if (func->StructParent->Name == "RFMenuChoice_MouseSensitivity")
+		{
+			float defaultSens = instance->GetFloat("defaultValue");
+			if (UObject* player = instance->GetUObject("Player"))
+				CallEvent(player, "UpdateSensitivity", { ExpressionValue::FloatValue(defaultSens) });
+			if (UObject* btnSlider = instance->GetUObject("btnSlider"))
+			{
+				if (auto* winSlider = UObject::TryCast<UScaleWindow>(btnSlider->GetUObject("winSlider")))
+				{
+					float rawTick = defaultSens < 1.0f ? (defaultSens * 10.0f - 1.0f) : (defaultSens + 8.0f);
+					int tick = std::clamp((int)std::lround(rawTick), 0, std::max(0, winSlider->GetNumTicks() - 1));
+					winSlider->SetTickPosition(tick);
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
+	// Keyboard/Mouse (MenuScreenCustomizeKeys.ResetToDefaults) calls BuildKeyBindings() which
+	// reloads the already-saved User.ini instead of DefUser.ini / RevisionDefUser.ini.
+	if (func->Name == "ResetToDefaults" && func->StructParent->Name == "MenuScreenCustomizeKeys")
+	{
+		UProperty* pVals1 = instance->GetMemberProperty("MenuValues1");
+		UProperty* pVals2 = instance->GetMemberProperty("MenuValues2");
+		UProperty* pAliases = instance->GetMemberProperty("AliasNames");
+		UProperty* pPending = instance->GetMemberProperty("PendingCommands");
+		auto* vals1 = static_cast<ScriptString*>(instance->GetProperty(pVals1));
+		auto* vals2 = static_cast<ScriptString*>(instance->GetProperty(pVals2));
+		auto* aliases = static_cast<ScriptString*>(instance->GetProperty(pAliases));
+		auto* pendingCmds = static_cast<ScriptString*>(instance->GetProperty(pPending));
+		if (!vals1 || !vals2 || !aliases || !pendingCmds)
+			return false;
+
+		const int numRows = std::min({ pVals1->ArrayDimension, pVals2->ArrayDimension, pAliases->ArrayDimension });
+		for (int j = 0; j < numRows; j++)
+		{
+			vals1[j].clear();
+			vals2[j].clear();
+		}
+
+		UObject* player = instance->GetUObject("Player");
+		uint32_t fb = 0;
+		BitfieldBool found(&fb, 1);
+		int pendingCount = 0;
+		for (int i = 0; i < 255; i++)
+		{
+			std::string keyName = engine->ConsoleCommand(player, "KEYNAME " + std::to_string(i), found);
+			if (keyName.empty())
+				continue;
+
+			std::string defAlias = engine->packages->GetDefUserIniValue("Engine.Input", keyName, "");
+			std::string curAlias = engine->ConsoleCommand(player, "KEYBINDING " + keyName, found);
+			if (defAlias != curAlias && pendingCount < pPending->ArrayDimension)
+			{
+				pendingCmds[pendingCount++] = UTF8ToScript(
+					defAlias.empty()
+						? ("SET ini:Engine.Engine.Input " + keyName)
+						: ("SET ini:Engine.Engine.Input " + keyName + " " + defAlias));
+			}
+			if (defAlias.empty())
+				continue;
+
+			size_t spacePos = defAlias.find(' ');
+			std::string matchAlias = spacePos == std::string::npos ? defAlias : defAlias.substr(0, spacePos);
+			ScriptString matchAlias16 = UTF8ToScript(matchAlias);
+			ScriptString dispName = CallEvent(instance, "GetKeyDisplayNameFromKeyName",
+				{ ExpressionValue::StringValue(UTF8ToScript(keyName)) }).ToScriptString();
+			for (int j = 0; j < numRows; j++)
+			{
+				if (!aliases[j].empty() && aliases[j] == matchAlias16)
+				{
+					if (vals1[j].empty())
+						vals1[j] = dispName;
+					else if (vals2[j].empty())
+						vals2[j] = dispName;
+				}
+			}
+		}
+
+		instance->SetInt("Pending", pendingCount);
+		instance->SetInt("Selection", -1);
+		instance->SetBool("bWaitingForInput", false);
+		CallEvent(instance, "PopulateKeyList", {});
+		CallEvent(instance, "ShowHelp", { ExpressionValue::StringValue(instance->GetString("WaitingHelpText")) });
+		return true;
+	}
+
+	return false;
+}
+
 ExpressionValue Frame::CallScript(UFunction* func, UObject* instance, CallArguments& args, ExpressionValue* into)
 {
+	if (TryHandleBrokenMenuReset(func, instance))
+		return ExpressionValue::NothingValue();
+
 	// Deus Ex: a singular function held off gives nothing, a zero to whatever
 	// reads it, and leaves a variable assigned from it as it was, as the
 	// original's, whose Let has the call write its result in the variable

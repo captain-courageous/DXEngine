@@ -917,7 +917,7 @@ if(APPLE)
     set(DEUSEX_BUNDLE_BOOTSTRAP "${CMAKE_CURRENT_SOURCE_DIR}/NativePort/package_launcher.mm")
     list(APPEND DXCOMMON_SOURCES DXEngine/RenderDevice/Metal/MetalRenderDevice.mm DXEngine/MacIntegration.mm "${DEUSEX_BUNDLE_BOOTSTRAP}")
     set_source_files_properties(DXEngine/RenderDevice/Metal/MetalRenderDevice.mm DXEngine/MacIntegration.mm "${DEUSEX_BUNDLE_BOOTSTRAP}" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-    list(APPEND DXCOMMON_LIBS "-framework Metal" "-framework QuartzCore" "-framework GameController")
+    list(APPEND DXCOMMON_LIBS "-framework Metal" "-framework QuartzCore" "-framework GameController" "-framework CoreAudio")
 endif()
 
 if(MSVC)

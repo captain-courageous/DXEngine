@@ -2329,6 +2329,20 @@ void UWindow::DrawBackground(UGC* gc)
 {
 	if (bDrawRawBackground())
 	{
+		// When the 4:3 root window is centred inside a wider viewport, stretch or
+		// tile its own background (e.g. the dimmed pause overlay) across the whole screen.
+		float drawX = 0.0f;
+		float drawY = 0.0f;
+		float drawW = Width();
+		float drawH = Height();
+		if (!parentOwner())
+		{
+			drawX = -UsedX;
+			drawY = -UsedY;
+			drawW = std::max(drawW, GetExtendedVirtualWidth());
+			drawH = std::max(drawH, GetVirtualHeight());
+		}
+
 		gc->SetStyle((EDrawStyle)backgroundStyle());
 		gc->EnableSmoothing(bSmoothBackground());
 		gc->SetTileColor(tileColor());
@@ -2338,14 +2352,14 @@ void UWindow::DrawBackground(UGC* gc)
 			{
 				float swidth = (float)tex->USize();
 				float sheight = (float)tex->VSize();
-				Rectf dest = Rectf::xywh(gc->offsetX, gc->offsetY, Width(), Height());
+				Rectf dest = Rectf::xywh(gc->offsetX + drawX, gc->offsetY + drawY, drawW, drawH);
 				Rectf src = Rectf::xywh(0.0f, 0.0f, swidth, sheight);
 				gc->DrawTile(tex, gc->ScaleRect(dest), src, tileColor(), gc->EffectivePolyFlags());
 			}
 		}
 		else if (Background())
 		{
-			gc->DrawPattern(0.0f, 0.0f, Width(), Height(), 0.0f, 0.0f, Background());
+			gc->DrawPattern(drawX, drawY, drawW, drawH, 0.0f, 0.0f, Background());
 		}
 		// DrawDebugBox(gc);
 	}

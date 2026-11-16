@@ -20,12 +20,58 @@
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/alext.h>
+#ifdef __APPLE__
+// Avoid MacTypes.h Point/Size/Rect collision with dxwidgets/core/rect.h pulled in by Precomp.h
+#define Point MacTypesPoint
+#define Size MacTypesSize
+#define Rect MacTypesRect
+#include <CoreAudio/CoreAudio.h>
+#undef Point
+#undef Size
+#undef Rect
+#endif
+
+static void FillContextAttribs(ALCint (&attribs)[9], int requestedFrequency)
+{
+	int idx = 0;
+#ifndef __APPLE__
+	attribs[idx++] = ALC_FREQUENCY;
+	attribs[idx++] = requestedFrequency;
+#else
+	(void)requestedFrequency;
+#endif
+	attribs[idx++] = ALC_REFRESH;
+	attribs[idx++] = 60;
+	attribs[idx++] = ALC_SYNC;
+	attribs[idx++] = ALC_FALSE;
+	attribs[idx++] = ALC_OUTPUT_LIMITER_SOFT;
+	attribs[idx++] = ALC_FALSE;
+	attribs[idx++] = 0;
+}
+
+#ifdef __APPLE__
+static const AudioObjectPropertyAddress kDefaultOutputDeviceAddress = {
+	kAudioHardwarePropertyDefaultOutputDevice,
+	kAudioObjectPropertyScopeGlobal,
+	kAudioObjectPropertyElementMain
+};
+
+static AudioDeviceID GetSystemDefaultOutputDeviceId()
+{
+	AudioDeviceID devId = kAudioDeviceUnknown;
+	UInt32 size = sizeof(devId);
+	if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &kDefaultOutputDeviceAddress, 0, nullptr, &size, &devId) != noErr)
+		return kAudioDeviceUnknown;
+	return devId;
+}
+#endif
 
 class OpenALAudioDevice : public AudioDevice
 {
 public:
 	OpenALAudioDevice(int inFrequency, int numVoices, int inMusicBufferCount, int inMusicBufferSize, int mixAheadMs, bool inStereo)
 	{
+		requestedFrequency = inFrequency;
 		frequency = inFrequency;
 		musicBufferCount = inMusicBufferCount;
 		musicBufferSize = inMusicBufferSize;
@@ -52,16 +98,8 @@ public:
 		// at 16 bits, are added and saturated again, as Galaxy adds them
 		// (Galaxy.dll 0x106146a0; bugs.md AUD.16), where OpenAL Soft's
 		// limiter, on for an integer output, turned the sum down instead
-		const ALCint ctxAttribs[] =
-		{
-#ifndef __APPLE__
-			ALC_FREQUENCY, inFrequency,
-#endif
-			ALC_REFRESH, 60,
-			ALC_SYNC, ALC_FALSE,
-			ALC_OUTPUT_LIMITER_SOFT, ALC_FALSE,
-			0
-		};
+		ALCint ctxAttribs[9]{};
+		FillContextAttribs(ctxAttribs, requestedFrequency);
 
 		// The device closed again before a failure is thrown: the engine
 		// plays on without it (UDXEngineAudioDevice::InitDevice)
@@ -78,6 +116,17 @@ public:
 			alcCloseDevice(alDevice);
 			Exception::Throw("Failed to make OpenAL context current");
 		}
+
+#ifdef __APPLE__
+		currentOutputDeviceId = GetSystemDefaultOutputDeviceId();
+		if (alcIsExtensionPresent(alDevice, "ALC_SOFT_reopen_device"))
+			reopenDeviceProc = reinterpret_cast<LPALCREOPENDEVICESOFT>(alcGetProcAddress(alDevice, "alcReopenDeviceSOFT"));
+		if (reopenDeviceProc &&
+			AudioObjectAddPropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddress, &OnDefaultOutputDeviceChanged, this) == noErr)
+		{
+			hasOutputListener = true;
+		}
+#endif
 
 		ALCint actualFreq = inFrequency;
 		alcGetIntegerv(alDevice, ALC_FREQUENCY, 1, &actualFreq);
@@ -110,6 +159,13 @@ public:
 
 	~OpenALAudioDevice()
 	{
+#ifdef __APPLE__
+		if (hasOutputListener)
+		{
+			AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddress, &OnDefaultOutputDeviceChanged, this);
+			hasOutputListener = false;
+		}
+#endif
 		{
 			std::unique_lock lock(musicThreadData.mutex);
 			musicThreadData.exitFlag = true;
@@ -397,6 +453,9 @@ public:
 
 	void Update() override
 	{
+#ifdef __APPLE__
+		FollowSystemDefaultOutput();
+#endif
 		std::string failure;
 		{
 			std::unique_lock lock(musicThreadData.mutex);
@@ -765,7 +824,73 @@ public:
 		size_t Num = 0;
 	};
 
+	int requestedFrequency = 48000;
 	int frequency = 48000;
+
+#ifdef __APPLE__
+	static OSStatus OnDefaultOutputDeviceChanged(AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData)
+	{
+		auto* self = static_cast<OpenALAudioDevice*>(inClientData);
+		self->defaultOutputDirty.store(true, std::memory_order_release);
+		return noErr;
+	}
+
+	void FollowSystemDefaultOutput()
+	{
+		if (!reopenDeviceProc || !alDevice)
+			return;
+		auto now = std::chrono::steady_clock::now();
+		bool triggered = defaultOutputDirty.exchange(false, std::memory_order_acq_rel);
+		if (!triggered && (!pendingOutputSwitch || now < nextOutputRetryAt))
+			return;
+
+		AudioDeviceID newDev = GetSystemDefaultOutputDeviceId();
+		if (newDev == kAudioDeviceUnknown)
+		{
+			pendingOutputSwitch = true;
+			nextOutputRetryAt = now + std::chrono::milliseconds(200);
+			return;
+		}
+		if (newDev == currentOutputDeviceId && !triggered)
+		{
+			pendingOutputSwitch = false;
+			return;
+		}
+		if (newDev == currentOutputDeviceId)
+			return;
+
+		ALCint ctxAttribs[9]{};
+		FillContextAttribs(ctxAttribs, requestedFrequency);
+		if (reopenDeviceProc(alDevice, nullptr, ctxAttribs) == ALC_TRUE)
+		{
+			currentOutputDeviceId = newDev;
+			pendingOutputSwitch = false;
+			outputSwitchRetries = 0;
+			const ALCchar* devName = alcGetString(alDevice, ALC_ALL_DEVICES_SPECIFIER);
+			if (!devName)
+				devName = alcGetString(alDevice, ALC_DEVICE_SPECIFIER);
+			LogMessage("Audio output switched to system default: " + std::string(devName ? devName : "default"));
+		}
+		else if (++outputSwitchRetries < 15)
+		{
+			pendingOutputSwitch = true;
+			nextOutputRetryAt = now + std::chrono::milliseconds(200);
+		}
+		else
+		{
+			pendingOutputSwitch = false;
+			outputSwitchRetries = 0;
+		}
+	}
+
+	LPALCREOPENDEVICESOFT reopenDeviceProc = nullptr;
+	AudioDeviceID currentOutputDeviceId = kAudioDeviceUnknown;
+	std::atomic<bool> defaultOutputDirty{ false };
+	bool hasOutputListener = false;
+	bool pendingOutputSwitch = false;
+	int outputSwitchRetries = 0;
+	std::chrono::steady_clock::time_point nextOutputRetryAt{};
+#endif
 
 	// Note: variables changed in musicThreadData *must* be done within a mutex lock to be thread safe
 	struct

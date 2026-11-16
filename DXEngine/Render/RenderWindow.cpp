@@ -61,7 +61,11 @@ void RenderSubsystem::DrawRawBackground(URootWindow* root)
 	if (!tex)
 		return;
 
-	Rectf full = Rectf::xywh(0.0f, 0.0f, root->Width(), root->Height());
+	Rectf full = Rectf::xywh(
+		-root->UsedX,
+		-root->UsedY,
+		std::max(root->Width(), UWindow::GetExtendedVirtualWidth()),
+		std::max(root->Height(), UWindow::GetVirtualHeight()));
 	Array<Rectf> pieces;
 	if (!root->bRender())
 	{
@@ -69,12 +73,18 @@ void RenderSubsystem::DrawRawBackground(URootWindow* root)
 	}
 	else if (root->RenderViewportSet)
 	{
-		// The original's clip list subtraction: above the viewport, below
-		// it, then left and right of it within its height.
-		float cutLeft = std::max(root->renderX(), full.left);
-		float cutTop = std::max(root->renderY(), full.top);
-		float cutRight = std::min(root->renderX() + root->renderWidth(), full.right);
-		float cutBottom = std::min(root->renderY() + root->renderHeight(), full.bottom);
+		// Match VisibleFrame::SetupSceneFrame's full-root expansion so widescreen
+		// letterboxed cutscenes/dialogues do not paint black pillarbox bars over the scene.
+		float rx = root->renderX();
+		float ry = root->renderY();
+		float rw = root->renderWidth();
+		float rh = root->renderHeight();
+		bool fullWidth = (rx <= 0.0f && rx + rw >= root->Width());
+		bool fullHeight = (ry <= 0.0f && ry + rh >= root->Height());
+		float cutLeft = fullWidth ? full.left : std::max(rx, full.left);
+		float cutRight = fullWidth ? full.right : std::min(rx + rw, full.right);
+		float cutTop = fullHeight ? full.top : std::max(ry, full.top);
+		float cutBottom = fullHeight ? full.bottom : std::min(ry + rh, full.bottom);
 		if (cutRight <= cutLeft || cutBottom <= cutTop)
 		{
 			pieces.push_back(full);

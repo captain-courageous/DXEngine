@@ -1,9 +1,12 @@
 
 #include "Precomp.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include "URootWindow.h"
 #include "Utils/Logger.h"
 #include "Packages/Engine/UViewport.h"
+#include "Packages/Engine/Actors/Pawn/UPlayerPawn.h"
 #include "Packages/Engine/Resources/USound.h"
 #include "Packages/Engine/Resources/Textures/UTexture.h"
 #include "Packages/Extension/Windows/UGC.h"
@@ -722,6 +725,22 @@ bool URootWindow::OnWindowRawMouseMove(int dx, int dy)
 {
 	if (IsCursorVisible() && !bMouseMoveLocked())
 	{
+#ifdef __APPLE__
+		// Cocoa [NSEvent deltaX/Y] are already OS-accelerated display points.
+		// Map them into virtual root coordinates scaled by the player's in-game
+		// MouseSensitivity so Controls -> Mouse Sensitivity governs both.
+		float dpiScale = (engine && engine->window) ? (float)engine->window->GetDpiScale() : 1.0f;
+		float virtualScale = std::max(GetVirtualScale(), 1.0f);
+		float sensitivity = 1.0f;
+		if (engine && engine->viewport && engine->viewport->Actor())
+		{
+			float s = engine->viewport->Actor()->MouseSensitivity();
+			if (std::isfinite(s) && s > 0.0f)
+				sensitivity = std::clamp(s, 0.1f, 20.0f);
+		}
+		float pointToVirtual = (dpiScale / virtualScale) * sensitivity;
+		SetRootCursorPos(MouseX() + (float)dx * pointToVirtual, MouseY() + (float)dy * pointToVirtual);
+#else
 		float moveX = (float)dx;
 		float moveY = (float)dy;
 		if (std::abs(moveX) > 2.0f || std::abs(moveY) > 2.0f)
@@ -730,6 +749,7 @@ bool URootWindow::OnWindowRawMouseMove(int dx, int dy)
 			moveY += moveY;
 		}
 		SetRootCursorPos(MouseX() + moveX, MouseY() + moveY);
+#endif
 	}
 	return IsMouseGrabbed();
 }

@@ -252,6 +252,8 @@ public:
     CGImageRef cgImage = nullptr;
     std::map<InputKey, bool> keyState;
     bool cursorLocked = false;
+    double rawDeltaRemainderX = 0.0;
+    double rawDeltaRemainderY = 0.0;
     bool resizable = true;
     bool wantsFullscreen = false;
     bool fullscreenTransition = false;
@@ -578,7 +580,14 @@ void CocoaDisplayWindowImpl::syncFullscreenState()
     {
         if (impl->cursorLocked)
         {
-            impl->windowHost->OnWindowRawMouseMove((int)[theEvent deltaX], (int)[theEvent deltaY]);
+            impl->rawDeltaRemainderX += [theEvent deltaX];
+            impl->rawDeltaRemainderY += [theEvent deltaY];
+            int dx = (int)std::trunc(impl->rawDeltaRemainderX);
+            int dy = (int)std::trunc(impl->rawDeltaRemainderY);
+            impl->rawDeltaRemainderX -= dx;
+            impl->rawDeltaRemainderY -= dy;
+            if (dx != 0 || dy != 0)
+                impl->windowHost->OnWindowRawMouseMove(dx, dy);
         }
         else
         {
@@ -1313,6 +1322,8 @@ void CocoaDisplayWindow::LockCursor()
         center = [impl->window convertPointToScreen:[view convertPoint:center toView:nil]];
         CGWarpMouseCursorPosition(CGPointMake(center.x, NSMaxY(NSScreen.screens.firstObject.frame) - center.y));
         impl->cursorLocked = true;
+        impl->rawDeltaRemainderX = 0.0;
+        impl->rawDeltaRemainderY = 0.0;
         CGAssociateMouseAndMouseCursorPosition(false);
         [NSCursor hide];
     }
@@ -1323,6 +1334,8 @@ void CocoaDisplayWindow::UnlockCursor()
     if (impl->window && impl->cursorLocked)
     {
         impl->cursorLocked = false;
+        impl->rawDeltaRemainderX = 0.0;
+        impl->rawDeltaRemainderY = 0.0;
         CGAssociateMouseAndMouseCursorPosition(true);
         [NSCursor unhide];
     }
