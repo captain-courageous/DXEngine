@@ -203,6 +203,11 @@ public:
 	// a bloom draws on.
 	virtual void BeginWorld() { }
 	virtual void EndWorld() { }
+	virtual bool SupportsPortalMask() const { return false; }
+	virtual void BeginPortalMask() { }
+	virtual void BeginPortalScene() { }
+	virtual void BeginPortalUnmask() { }
+	virtual void EndPortalMask() { }
 	virtual void TakeBloom() { }
 	virtual void SetSceneNode(SceneNode* Frame) = 0;
 	virtual void PrecacheTexture(TextureInfo& Info, uint32_t PolyFlags) = 0;

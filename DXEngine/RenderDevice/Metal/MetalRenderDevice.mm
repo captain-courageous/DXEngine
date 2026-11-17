@@ -23,7 +23,7 @@ void objc_autoreleasePoolPop(void* context);
 }
 
 namespace {
-struct Vertex { vec4 position,color; vec2 uv,lm; vec4 detail,macro,fog; };
+struct Vertex { vec4 position,color; vec2 uv,lm,detail,macro; vec4 fog; float clipDistance,pad0,pad1,pad2; };
 struct DrawFlags { uint32_t poly, textures; };
 static_assert(sizeof(Vertex)==96);
 
@@ -142,11 +142,15 @@ float MetalGammaExponent(float brightness)
 const char* source=R"(
 #include <metal_stdlib>
 using namespace metal;
-struct V { float4 position,color; float2 uv,lm; float4 detail,macro,fog; };
+struct V { float4 position,color; float2 uv,lm,detail,macro; float4 fog; float clipDistance,pad0,pad1,pad2; };
 struct DrawFlags { uint poly, textures; };
-struct Out { float4 position [[position]]; float4 color; float2 uv,lm,detail,macro; float4 fog; };
+struct Out { float4 position [[position]]; float4 color; float2 uv,lm,detail,macro; float4 fog; float clipDistance [[clip_distance]]; };
 vertex Out mainVS(uint i [[vertex_id]],const device V* v [[buffer(0)]]) {
-    return {v[i].position,v[i].color,v[i].uv,v[i].lm,v[i].detail.xy,v[i].macro.xy,v[i].fog};
+    Out o;
+    o.position=v[i].position; o.color=v[i].color; o.uv=v[i].uv; o.lm=v[i].lm;
+    o.detail=v[i].detail; o.macro=v[i].macro; o.fog=v[i].fog;
+    o.clipDistance=v[i].clipDistance;
+    return o;
 }
 fragment float4 mainPS(Out v [[stage_in]],texture2d<float> tex [[texture(0)]],texture2d<float> light [[texture(1)]],texture2d<float> detail [[texture(2)]],texture2d<float> macro [[texture(3)]],sampler s [[sampler(0)]],sampler lightSampler [[sampler(1)]],constant DrawFlags& flags [[buffer(0)]]) {
     float4 c=tex.sample(s,v.uv);
@@ -210,7 +214,8 @@ class MetalRenderDevice final : public RenderDevice {
     } batch;
     struct BoundState {
         bool valid = false;
-        bool depthWrite = false;
+        __unsafe_unretained id<MTLDepthStencilState> depthStencil = nil;
+        uint32_t stencilRef = 0xffffffff;
         __unsafe_unretained id<MTLRenderPipelineState> pipeline = nil;
         __unsafe_unretained id<MTLBuffer> buffer = nil;
         std::array<__unsafe_unretained id<MTLTexture>,4> images{};
@@ -219,11 +224,16 @@ class MetalRenderDevice final : public RenderDevice {
         int depthBias = 0;
         void reset() { *this = BoundState{}; }
     } bound;
+    enum class PortalPhase : uint8_t { Scene, Mask, Unmask };
+    PortalPhase portalPhase = PortalPhase::Scene;
+    uint8_t stencilDepth = 0;
     size_t drawCalls=0;
     bool worldPass=false,worldRendering=false;
     id<MTLSamplerState> sampler,nearest,nearestClamp,linear,lightSampler;
     std::unordered_map<uint32_t,id<MTLRenderPipelineState>> pipelines;
     std::array<id<MTLDepthStencilState>,2> depths{};
+    std::array<id<MTLDepthStencilState>,2> portalDepths{};
+    id<MTLDepthStencilState> portalMaskState=nil,portalUnmaskState=nil;
     struct CachedTexture { int mip; id<MTLTexture> texture; };
     struct TextureKeyHash {
         size_t operator()(const std::pair<uint64_t,bool>& k) const noexcept {
@@ -233,6 +243,7 @@ class MetalRenderDevice final : public RenderDevice {
     std::unordered_map<std::pair<uint64_t,bool>,CachedTexture,TextureKeyHash> textures;
     Rect renderRect, lastFrameRect;
     mat4 transform=mat4::identity();
+    vec4 clipPlane{0,0,0,1};
     SceneNode* current=nullptr;
     vec4 flashScale{},flashFog{};
     bool frameReported=false;
@@ -262,7 +273,8 @@ class MetalRenderDevice final : public RenderDevice {
         auto desc=[MTLRenderPipelineDescriptor new];
         desc.vertexFunction=[library newFunctionWithName:@"mainVS"];
         desc.fragmentFunction=[library newFunctionWithName:@"mainPS"];
-        desc.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float;
+        desc.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
+        desc.stencilAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
         auto c=desc.colorAttachments[0]; c.pixelFormat=MTLPixelFormatBGRA8Unorm;
         c.writeMask=(flags&PF_Invisible) ? MTLColorWriteMaskNone : MTLColorWriteMaskAll;
         c.blendingEnabled=bool(key&(PF_Translucent|PF_Modulated|PF_Highlighted));
@@ -278,15 +290,19 @@ class MetalRenderDevice final : public RenderDevice {
     id<MTLTexture> presentTarget() const {
         return captureReadableFrame ? captureTarget : drawable.texture;
     }
-    void beginPass(bool clearColor,bool clearDepth,vec4 color={}) {
+    void beginPass(bool clearColor,bool clearDepth,vec4 color={},bool clearStencil=false) {
         auto pass=[MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture=worldPass ? worldColor : gammaExponent!=1.0f ? frameColor : presentTarget();
         pass.colorAttachments[0].loadAction=clearColor ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction=MTLStoreActionStore;
         pass.colorAttachments[0].clearColor=MTLClearColorMake(color.x,color.y,color.z,color.w);
-        pass.depthAttachment.texture=worldPass ? worldDepth : depth;
+        id<MTLTexture> dsTex=worldPass ? worldDepth : depth;
+        pass.depthAttachment.texture=dsTex;
         pass.depthAttachment.loadAction=clearDepth ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.depthAttachment.storeAction=MTLStoreActionDontCare; pass.depthAttachment.clearDepth=1;
+        pass.stencilAttachment.texture=dsTex;
+        pass.stencilAttachment.loadAction=clearStencil ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.stencilAttachment.storeAction=MTLStoreActionStore; pass.stencilAttachment.clearStencil=0;
         encoder=[commands renderCommandEncoderWithDescriptor:pass];
         [encoder setCullMode:MTLCullModeNone];
         [encoder setFragmentSamplerState:lightSampler atIndex:1];
@@ -297,9 +313,19 @@ class MetalRenderDevice final : public RenderDevice {
         if (!batch.count) return;
         const bool writes=!(batch.poly&(PF_Translucent|PF_Modulated)) || (batch.poly&PF_Occlude);
         id<MTLRenderPipelineState> pipe=pipeline(batch.poly);
-        if (!bound.valid || bound.depthWrite!=writes) {
-            [encoder setDepthStencilState:depths[writes ? 1 : 0]];
-            bound.depthWrite=writes;
+        id<MTLDepthStencilState> dsState=nil;
+        uint32_t ref=0;
+        if (portalPhase==PortalPhase::Mask) { dsState=portalMaskState; ref=stencilDepth; }
+        else if (portalPhase==PortalPhase::Unmask) { dsState=portalUnmaskState; ref=stencilDepth; }
+        else if (stencilDepth>0) { dsState=portalDepths[writes ? 1 : 0]; ref=stencilDepth; }
+        else { dsState=depths[writes ? 1 : 0]; }
+        if (!bound.valid || bound.depthStencil!=dsState) {
+            [encoder setDepthStencilState:dsState];
+            bound.depthStencil=dsState;
+        }
+        if (!bound.valid || bound.stencilRef!=ref) {
+            [encoder setStencilReferenceValue:ref];
+            bound.stencilRef=ref;
         }
         if (!bound.valid || bound.buffer!=batch.buffer) {
             [encoder setVertexBuffer:batch.buffer offset:batch.offset atIndex:0];
@@ -339,7 +365,8 @@ class MetalRenderDevice final : public RenderDevice {
         if (!encoder || !count) return nullptr;
         if (count>device.maxBufferLength/sizeof(Vertex)) throw std::runtime_error("Metal: too many vertices");
         const bool masked=(flags&PF_Masked)!=0;
-        if (flags&PF_Translucent) flags&=~PF_Masked;
+        flags=ApplyPrecedenceRules(flags);
+        if (portalPhase!=PortalPhase::Scene) flags=(flags&~PF_Occlude)|PF_Invisible;
         std::array<__unsafe_unretained id<MTLTexture>,4> images={texture(tex,masked),texture(lm),texture(detail),texture(macro)};
         const uint32_t textureFlags=(lm ? 1u : 0u) | (detail ? (fogMap ? 8u : 2u) : 0u) | (macro ? 4u : 0u) | (meshFog ? 16u : 0u);
         __unsafe_unretained id<MTLSamplerState> selected=(flags&PF_NoSmooth) ? (clamp ? nearestClamp : nearest) : clamp ? lightSampler : smoothWorld ? sampler : linear;
@@ -402,14 +429,41 @@ class MetalRenderDevice final : public RenderDevice {
         composite.vertexFunction=[library newFunctionWithName:@"compositeVS"];
         composite.fragmentFunction=[library newFunctionWithName:@"compositePS"];
         composite.colorAttachments[0].pixelFormat=layer.pixelFormat;
-        composite.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float;
+        composite.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
+        composite.stencilAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
         compositePipeline=[device newRenderPipelineStateWithDescriptor:composite error:&error];
         if (!compositePipeline) throw std::runtime_error(error.localizedDescription.UTF8String);
         composite.fragmentFunction=[library newFunctionWithName:@"gammaPS"];
         composite.depthAttachmentPixelFormat=MTLPixelFormatInvalid;
+        composite.stencilAttachmentPixelFormat=MTLPixelFormatInvalid;
         gammaPipeline=[device newRenderPipelineStateWithDescriptor:composite error:&error];
         if (!gammaPipeline) throw std::runtime_error(error.localizedDescription.UTF8String);
-        for (bool write:{false,true}) { auto d=[MTLDepthStencilDescriptor new]; d.depthCompareFunction=MTLCompareFunctionLessEqual; d.depthWriteEnabled=write; depths[write ? 1 : 0]=[device newDepthStencilStateWithDescriptor:d]; }
+        for (bool write:{false,true}) {
+            auto d=[MTLDepthStencilDescriptor new]; d.depthCompareFunction=MTLCompareFunctionLessEqual; d.depthWriteEnabled=write;
+            depths[write ? 1 : 0]=[device newDepthStencilStateWithDescriptor:d];
+            auto st=[MTLStencilDescriptor new];
+            st.stencilCompareFunction=MTLCompareFunctionEqual;
+            st.stencilFailureOperation=MTLStencilOperationKeep;
+            st.depthFailureOperation=MTLStencilOperationKeep;
+            st.depthStencilPassOperation=MTLStencilOperationKeep;
+            st.readMask=0xff; st.writeMask=0x00;
+            d.frontFaceStencil=st; d.backFaceStencil=st;
+            portalDepths[write ? 1 : 0]=[device newDepthStencilStateWithDescriptor:d];
+        }
+        {
+            auto d=[MTLDepthStencilDescriptor new]; d.depthCompareFunction=MTLCompareFunctionAlways; d.depthWriteEnabled=NO;
+            auto st=[MTLStencilDescriptor new];
+            st.stencilCompareFunction=MTLCompareFunctionEqual;
+            st.stencilFailureOperation=MTLStencilOperationKeep;
+            st.depthFailureOperation=MTLStencilOperationKeep;
+            st.depthStencilPassOperation=MTLStencilOperationIncrementClamp;
+            st.readMask=0xff; st.writeMask=0xff;
+            d.frontFaceStencil=st; d.backFaceStencil=st;
+            portalMaskState=[device newDepthStencilStateWithDescriptor:d];
+            st.depthStencilPassOperation=MTLStencilOperationDecrementClamp;
+            d.frontFaceStencil=st; d.backFaceStencil=st;
+            portalUnmaskState=[device newDepthStencilStateWithDescriptor:d];
+        }
         white=[device newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO]];
         uint32_t pixel=0xffffffff; [white replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&pixel bytesPerRow:4];
         fprintf(stderr,"Native ARM64 Metal backend: %s\n",device.name.UTF8String);
@@ -463,11 +517,12 @@ public:
             return;
         }
         if (!depth || depth.width!=t.width || depth.height!=t.height) {
-            auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:t.width height:t.height mipmapped:NO];
+            auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:t.width height:t.height mipmapped:NO];
             desc.storageMode=MTLStorageModePrivate; desc.usage=MTLTextureUsageRenderTarget; depth=[device newTextureWithDescriptor:desc];
         }
         prepareFrameColor(t);
-        commands=[queue commandBuffer]; current=nullptr; beginPass(true,true,engine->classicAspectRatio ? vec4(0,0,0,1) : clear);
+        commands=[queue commandBuffer]; current=nullptr; clipPlane={0,0,0,1}; portalPhase=PortalPhase::Scene; stencilDepth=0;
+        beginPass(true,true,engine->classicAspectRatio ? vec4(0,0,0,1) : clear,true);
     }
     void Unlock(bool blit) override {
         if (!commands) {
@@ -514,12 +569,17 @@ public:
             auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:width height:height mipmapped:NO];
             desc.storageMode=MTLStorageModePrivate; desc.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
             worldColor=[device newTextureWithDescriptor:desc];
-            desc.pixelFormat=MTLPixelFormatDepth32Float; desc.usage=MTLTextureUsageRenderTarget;
+            desc.pixelFormat=MTLPixelFormatDepth32Float_Stencil8; desc.usage=MTLTextureUsageRenderTarget;
             worldDepth=[device newTextureWithDescriptor:desc];
             if (!worldColor || !worldDepth) throw std::runtime_error("Metal: world target allocation failed");
         }
-        worldPass=true; beginPass(true,true,vec4(0,0,0,1));
+        worldPass=true; portalPhase=PortalPhase::Scene; stencilDepth=0; beginPass(true,true,vec4(0,0,0,1),true);
     }
+    bool SupportsPortalMask() const override { return true; }
+    void BeginPortalMask() override { flushDraws(); portalPhase=PortalPhase::Mask; }
+    void BeginPortalScene() override { flushDraws(); portalPhase=PortalPhase::Scene; if (stencilDepth<255) ++stencilDepth; }
+    void BeginPortalUnmask() override { flushDraws(); portalPhase=PortalPhase::Unmask; }
+    void EndPortalMask() override { flushDraws(); portalPhase=PortalPhase::Scene; if (stencilDepth>0) --stencilDepth; }
     void EndWorld() override {
         worldRendering=false;
         if (!worldPass) return;
@@ -540,7 +600,10 @@ public:
         flushDraws();
         current=frame;
         float rz=std::tan(radians(frame->FovAngle)*0.5f),aspect=frame->FY/frame->FX;
-        transform=mat4::scale(1,-1,1)*mat4::frustum(-rz,rz,-aspect*rz,aspect*rz,1,32768,handedness::left,clipzrange::zero_positive_w)*frame->WorldToView*frame->ObjectToWorld;
+        mat4 objectToView=frame->WorldToView*frame->ObjectToWorld;
+        transform=mat4::scale(1,-1,1)*PolygonShift(frame)*mat4::frustum(-rz,rz,-aspect*rz,aspect*rz,1,32768,handedness::left,clipzrange::zero_positive_w)*objectToView;
+        bool mirror=frame->NearClip!=vec4(0.0f,0.0f,1.0f,-1.0f);
+        clipPlane=mirror ? (mat4::transpose(objectToView)*frame->NearClip) : vec4(0.0f,0.0f,0.0f,1.0f);
         if (encoder) {
             const double sx=worldPass ? double(worldColor.width)/renderRect.width : 1.0;
             const double sy=worldPass ? double(worldColor.height)/renderRect.height : 1.0;
@@ -560,13 +623,13 @@ public:
         if (!out) return;
         auto vertex=[&](uint32_t i) {
             auto p=facet.Vertices[i]; auto relative=p-facet.MapCoords.Origin;
-            vec2 uv{dot(facet.MapCoords.XAxis,relative),dot(facet.MapCoords.YAxis,relative)},base{},light{};
-            vec4 detail{},macro{};
+            vec2 uv{dot(facet.MapCoords.XAxis,relative),dot(facet.MapCoords.YAxis,relative)},base{},light{},detail{},macro{};
             if (surface.Texture) base={(uv.x-surface.Texture->Pan.x)*GetUMult(*surface.Texture),(uv.y-surface.Texture->Pan.y)*GetVMult(*surface.Texture)};
             if (surface.LightMap) light={(uv.x-surface.LightMap->Pan.x+0.5f*surface.LightMap->UScale)*GetUMult(*surface.LightMap),(uv.y-surface.LightMap->Pan.y+0.5f*surface.LightMap->VScale)*GetVMult(*surface.LightMap)};
-            if (extra) detail={(uv.x-extra->Pan.x+(fog ? 0.5f*extra->UScale : 0))*GetUMult(*extra),(uv.y-extra->Pan.y+(fog ? 0.5f*extra->VScale : 0))*GetVMult(*extra),0,0};
-            if (surface.MacroTexture) macro={(uv.x-surface.MacroTexture->Pan.x)*GetUMult(*surface.MacroTexture),(uv.y-surface.MacroTexture->Pan.y)*GetVMult(*surface.MacroTexture),0,0};
-            return Vertex{transform*vec4(p,1),vec4(1),base,light,detail,macro,{}};
+            if (extra) detail={(uv.x-extra->Pan.x+(fog ? 0.5f*extra->UScale : 0))*GetUMult(*extra),(uv.y-extra->Pan.y+(fog ? 0.5f*extra->VScale : 0))*GetVMult(*extra)};
+            if (surface.MacroTexture) macro={(uv.x-surface.MacroTexture->Pan.x)*GetUMult(*surface.MacroTexture),(uv.y-surface.MacroTexture->Pan.y)*GetVMult(*surface.MacroTexture)};
+            vec4 pos{p,1};
+            return Vertex{transform*pos,vec4(1),base,light,detail,macro,{},dot(clipPlane,pos),0,0,0};
         };
         Vertex first=vertex(0),previous=vertex(1);
         for (uint32_t i=2;i<facet.VertexCount;++i) {
@@ -578,7 +641,7 @@ public:
         const bool fog=(flags&(PF_RenderFog|PF_Translucent|PF_Modulated))==PF_RenderFog;
         Vertex* out=reserveDraw(size_t(count-2)*3,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,fog);
         if (!out) return;
-        auto vertex=[&](int i) { return Vertex{transform*vec4(p[i].Point,1),(flags&PF_Modulated) ? vec4(1) : vec4(p[i].Light,1),{p[i].UV.x*GetUMult(info),p[i].UV.y*GetVMult(info)},{},{},{},p[i].Fog}; };
+        auto vertex=[&](int i) { vec4 pos{p[i].Point,1}; return Vertex{transform*pos,(flags&PF_Modulated) ? vec4(1) : vec4(p[i].Light,1),{p[i].UV.x*GetUMult(info),p[i].UV.y*GetVMult(info)},{},{},{},p[i].Fog,dot(clipPlane,pos),0,0,0}; };
         Vertex first=vertex(0),previous=vertex(1);
         for(int i=2;i<count;++i) {
             Vertex next=vertex(i); *out++=first; *out++=previous; *out++=next; previous=next;
@@ -592,7 +655,8 @@ public:
         if (!out) return;
         float um=GetUMult(info),vm=GetVMult(info);
         for(size_t i=0;i<count;++i) {
-            out[i]=Vertex{transform*vec4(p[i].Point,1),(flags&PF_Modulated) ? vec4(1) : vec4(p[i].Light,1),{p[i].UV.x*um,p[i].UV.y*vm},{},{},{},p[i].Fog};
+            vec4 pos{p[i].Point,1};
+            out[i]=Vertex{transform*pos,(flags&PF_Modulated) ? vec4(1) : vec4(p[i].Light,1),{p[i].UV.x*um,p[i].UV.y*vm},{},{},{},p[i].Fog,dot(clipPlane,pos),0,0,0};
         }
         info.bRealtimeChanged=false;
     }
@@ -604,22 +668,25 @@ public:
         const bool clamp=(u>=0.0f && u+ul<=1.00001f && v>=0.0f && v+vl<=1.00001f);
         Vertex* out=reserveDraw(6,&info,nullptr,flags,MTLPrimitiveTypeTriangle,nullptr,nullptr,false,false,worldRendering,0,clamp);
         if (!out) return;
-        out[0]={screen(frame,x,y,z),color,{u,v},{}};
-        out[1]={screen(frame,x+w,y,z),color,{u+ul,v},{}};
-        out[2]={screen(frame,x+w,y+h,z),color,{u+ul,v+vl},{}};
+        out[0]={screen(frame,x,y,z),color,{u,v},{},{},{},{},1,0,0,0};
+        out[1]={screen(frame,x+w,y,z),color,{u+ul,v},{},{},{},{},1,0,0,0};
+        out[2]={screen(frame,x+w,y+h,z),color,{u+ul,v+vl},{},{},{},{},1,0,0,0};
         out[3]=out[0]; out[4]=out[2];
-        out[5]={screen(frame,x,y+h,z),color,{u,v+vl},{}};
+        out[5]={screen(frame,x,y+h,z),color,{u,v+vl},{},{},{},{},1,0,0,0};
     }
     void Draw3DLine(SceneNode* frame,vec4 color,uint32_t,vec3 a,vec3 b) override {
         if(!current) SetSceneNode(frame);
         if (auto* out=reserveDraw(2,nullptr,nullptr,PF_Highlighted,MTLPrimitiveTypeLine)) {
-            out[0]={transform*vec4(a,1),color,{},{}}; out[1]={transform*vec4(b,1),color,{},{}};
+            vec4 pa{a,1},pb{b,1};
+            out[0]={transform*pa,color,{},{},{},{},{},dot(clipPlane,pa),0,0,0};
+            out[1]={transform*pb,color,{},{},{},{},{},dot(clipPlane,pb),0,0,0};
         }
     }
     void Draw2DLine(SceneNode* frame,vec4 color,uint32_t,vec3 a,vec3 b) override {
         if(!current) SetSceneNode(frame);
         if (auto* out=reserveDraw(2,nullptr,nullptr,PF_Highlighted,MTLPrimitiveTypeLine)) {
-            out[0]={screen(frame,a.x,a.y,a.z),color,{},{}}; out[1]={screen(frame,b.x,b.y,b.z),color,{},{}};
+            out[0]={screen(frame,a.x,a.y,a.z),color,{},{},{},{},{},1,0,0,0};
+            out[1]={screen(frame,b.x,b.y,b.z),color,{},{},{},{},{},1,0,0,0};
         }
     }
     void ClearZ() override { if(encoder) { flushDraws(); [encoder endEncoding];beginPass(false,true); } }

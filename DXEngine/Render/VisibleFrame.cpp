@@ -1119,12 +1119,35 @@ static void SortPortalSpans(Array<PortalSpan>& spans)
 	spans.swap(sorted);
 }
 
+static void DrawPortalGeometry(VisibleFrame* frame, VisiblePortal& portal)
+{
+	frame->Device->SetSceneNode(&frame->Frame);
+	if (portal.Mover)
+		VisibleBrush().DrawMirrorSeal(frame, portal.Mover, *portal.MoverPoly);
+
+	for (const auto& info : portal.Nodes)
+	{
+		VisibleNode visnode(info);
+		visnode.PolyFlags |= PF_Occlude | PF_Invisible;
+		visnode.ViewerBehind = true;
+		visnode.Draw(frame);
+	}
+}
+
 void VisibleFrame::DrawPortals()
 {
+	const bool useMask = Device->SupportsPortalMask();
 	for (VisiblePortal& portal : Portals)
 	{
 		// BspClipper requires the visible spans list to be sorted
 		SortPortalSpans(portal.Spans);
+
+		if (useMask)
+		{
+			Device->BeginPortalMask();
+			DrawPortalGeometry(this, portal);
+			Device->BeginPortalScene();
+		}
 
 		if (portal.SkyZone)
 		{
@@ -1221,22 +1244,23 @@ void VisibleFrame::DrawPortals()
 			mirrorframe.Draw();
 			Device->ClearZ();
 		}
+
+		if (useMask)
+		{
+			Device->BeginPortalUnmask();
+			DrawPortalGeometry(this, portal);
+			Device->EndPortalMask();
+		}
 	}
 
 	// Seal the portals
 	Device->SetSceneNode(&Frame);
 	for (VisiblePortal& portal : Portals)
 	{
-		if (portal.Mover)
-			VisibleBrush().DrawMirrorSeal(this, portal.Mover, *portal.MoverPoly);
+		DrawPortalGeometry(this, portal);
 
 		for (const auto& info : portal.Nodes)
 		{
-			VisibleNode visnode(info);
-			visnode.PolyFlags |= PF_Occlude | PF_Invisible;
-			visnode.ViewerBehind = true;
-			visnode.Draw(this);
-
 			if (info.PolyFlags & PF_NoOcclude)
 			{
 				if ((info.PolyFlags & (PF_Translucent | PF_Modulated)) == 0)
